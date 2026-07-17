@@ -3,14 +3,11 @@
 import {
   Activity,
   AlertTriangle,
-  Bot,
   CalendarDays,
   CheckCircle2,
-  ChevronDown,
   Clock3,
   Download,
   Eye,
-  FileCheck2,
   FileText,
   FolderKanban,
   Inbox,
@@ -38,7 +35,6 @@ import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 
 type PartyStatus = "attention" | "pending" | "accepted" | "no_response";
@@ -345,11 +341,6 @@ function initialsFor(name: string) {
     .toUpperCase();
 }
 
-function percent(value: number, total: number) {
-  if (!total) return 0;
-  return Math.round((value / total) * 100);
-}
-
 function parseCsvLine(line: string) {
   const cells: string[] = [];
   let cell = "";
@@ -415,7 +406,6 @@ export function PrexetWorkspace() {
   const [selectedProjectId, setSelectedProjectId] = useState(initialProjects[0].id);
   const [selectedPartyId, setSelectedPartyId] = useState(initialProjects[0].parties[0].id);
   const [projectQuery, setProjectQuery] = useState("");
-  const [partyQuery, setPartyQuery] = useState("");
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [dialog, setDialog] = useState<DialogId>(null);
   const [emailAudience, setEmailAudience] = useState<EmailAudience>("all");
@@ -423,12 +413,6 @@ export function PrexetWorkspace() {
   const [toast, setToast] = useState("");
   const [projectSidebarWidth, setProjectSidebarWidth] = useState(280);
   const [projectSidebarCollapsed, setProjectSidebarCollapsed] = useState(false);
-  const [openGroups, setOpenGroups] = useState<Record<PartyStatus, boolean>>({
-    attention: true,
-    pending: true,
-    accepted: true,
-    no_response: true,
-  });
 
   const projectSearchRef = useRef<HTMLInputElement>(null);
   const formInputRef = useRef<HTMLInputElement>(null);
@@ -447,9 +431,8 @@ export function PrexetWorkspace() {
     `${project.title} ${project.reference}`.toLowerCase().includes(projectQuery.toLowerCase()),
   );
 
-  const acceptedCount = countByStatus(selectedProject, "accepted");
   const attentionCount = countByStatus(selectedProject, "attention");
-  const responseCount = acceptedCount + attentionCount;
+  const projectReady = selectedProject.parties.length > 0 && Boolean(selectedProject.documentName);
 
   useEffect(() => {
     if (!toast) return;
@@ -528,9 +511,13 @@ export function PrexetWorkspace() {
 
     if (kind === "form") {
       setProjects((current) => current.map((project) => project.id === selectedProject.id
-        ? {
+          ? {
             ...project,
             documentName: file.name,
+            round: project.parties.length ? "Ready to send" : project.round,
+            summary: project.parties.length
+              ? "The recipient list and form document are ready. Add review instructions or send the first package."
+              : project.summary,
             activity: [`${file.name} uploaded as the current form.`, ...project.activity],
           }
         : project));
@@ -561,6 +548,10 @@ export function PrexetWorkspace() {
       return {
         ...project,
         parties: [...uniqueImports, ...project.parties],
+        round: project.documentName ? "Ready to send" : project.round,
+        summary: project.documentName
+          ? "The recipient list and form document are ready. Add review instructions or send the first package."
+          : project.summary,
         activity: [`${uniqueImports.length} parties imported from ${file.name}.`, ...project.activity],
       };
     }));
@@ -610,19 +601,16 @@ export function PrexetWorkspace() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const title = String(form.get("title") || "Untitled project");
-    const documentName = String(form.get("documentName") || "Form_Document.docx");
     const newProject: Project = {
       id: `project-${Date.now()}`,
       title,
-      reference: String(form.get("reference") || "PX-NEW"),
-      documentName,
-      due: String(form.get("due") || "TBD"),
-      round: "Initial send",
+      reference: `PX-${new Date().getFullYear()}-${String(projects.length + 1).padStart(2, "0")}`,
+      documentName: "",
+      due: "Not set",
+      round: "Setup",
       owner: "You",
-      guardrails: String(form.get("guardrails") || "Confirm changes before accepting.")
-        .split("\n")
-        .filter(Boolean),
-      summary: "New project shell created. Import an email list and upload the form document.",
+      guardrails: [],
+      summary: "Add a recipient list and form document to begin this project.",
       activity: ["Project created."],
       parties: [],
     };
@@ -800,105 +788,6 @@ export function PrexetWorkspace() {
         ) : null}
       </aside>
 
-      <aside className="party-panel border-r border-[var(--border)] bg-white">
-        <div className="flex h-full flex-col">
-          <div className="border-b border-[var(--border)] p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-xs font-semibold uppercase text-slate-500">Parties</p>
-                <h2 className="mt-1 truncate text-base font-semibold text-slate-950">{selectedProject.title}</h2>
-              </div>
-              <Button variant="outline" size="icon-sm" onClick={() => setDialog("party")} aria-label="Add party">
-                <UserPlus />
-              </Button>
-            </div>
-
-            <div className="mt-4 grid grid-cols-2 gap-2">
-              <Button variant="outline" size="sm" onClick={() => listInputRef.current?.click()}>
-                <UploadCloud />
-                Import list
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => openEmail("all")}>
-                <Send />
-                Send
-              </Button>
-            </div>
-
-            <label className="mt-3 flex h-9 items-center gap-2 rounded-lg border border-[var(--border)] bg-slate-50 px-2.5 text-slate-500">
-              <Search className="size-4" />
-              <input
-                value={partyQuery}
-                onChange={(event) => setPartyQuery(event.target.value)}
-                className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-slate-400"
-                placeholder="Search parties"
-              />
-            </label>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-auto p-3">
-            {statusOrder.map((status) => {
-              const parties = selectedProject.parties.filter(
-                (party) =>
-                  party.status === status &&
-                  `${party.name} ${party.company}`.toLowerCase().includes(partyQuery.toLowerCase()),
-              );
-              return (
-                <section key={status} className="mb-3">
-                  <button
-                    className="flex w-full items-center justify-between rounded-md px-1.5 py-2 text-left"
-                    onClick={() => setOpenGroups((current) => ({ ...current, [status]: !current[status] }))}
-                  >
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span className={cn("size-2 rounded-full", statusMeta[status].dot)} />
-                      <span className="truncate text-xs font-semibold uppercase text-slate-600">
-                        {statusMeta[status].label}
-                      </span>
-                      <span className="text-xs text-slate-400">{parties.length}</span>
-                    </span>
-                    <ChevronDown className={cn("size-4 text-slate-400 transition", !openGroups[status] && "-rotate-90")} />
-                  </button>
-                  {openGroups[status] ? (
-                    <div className="space-y-1">
-                      {parties.map((party) => {
-                        const isSelected = selectedParty?.id === party.id;
-                        return (
-                          <button
-                            key={party.id}
-                            onClick={() => setSelectedPartyId(party.id)}
-                            className={cn(
-                              "w-full rounded-lg border p-2.5 text-left transition",
-                              isSelected
-                                ? "border-[var(--accent-strong)] bg-[var(--accent-soft)]"
-                                : "border-transparent hover:border-slate-200 hover:bg-slate-50",
-                            )}
-                          >
-                            <div className="flex gap-2.5">
-                              <Avatar>{party.initials}</Avatar>
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center justify-between gap-2">
-                                  <p className="truncate text-sm font-semibold text-slate-950">{party.name}</p>
-                                  {party.clauseCount ? (
-                                    <span className="rounded bg-white px-1.5 py-0.5 text-[11px] font-semibold text-slate-600">
-                                      {party.clauseCount}
-                                    </span>
-                                  ) : null}
-                                </div>
-                                <p className="truncate text-xs text-slate-500">{party.company}</p>
-                                <p className="mt-1 truncate text-xs text-slate-400">{party.lastTouch}</p>
-                              </div>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-                </section>
-              );
-            })}
-          </div>
-        </div>
-      </aside>
-
       <main className="workspace-main">
         <div className="mobile-topbar border-b border-[var(--border)] bg-white px-4 py-3">
           <Button variant="ghost" size="icon-sm" onClick={() => setDialog("navigation")} aria-label="Open navigation">
@@ -925,64 +814,81 @@ export function PrexetWorkspace() {
               </div>
               <h1 className="mt-1 truncate text-2xl font-semibold text-slate-950">{selectedProject.title}</h1>
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <Badge className={statusMeta.attention.tone}>{attentionCount} need review</Badge>
-                <Badge className="border-slate-200 bg-white text-slate-700">
-                  <CalendarDays className="size-3.5" />
-                  Due {selectedProject.due}
-                </Badge>
-                <Badge className="border-slate-200 bg-white text-slate-700">
-                  <FileText className="size-3.5" />
-                  {selectedProject.documentName}
-                </Badge>
+                {attentionCount ? <Badge className={statusMeta.attention.tone}>{attentionCount} need review</Badge> : null}
+                {selectedProject.due !== "Not set" ? (
+                  <Badge className="border-slate-200 bg-white text-slate-700">
+                    <CalendarDays className="size-3.5" />
+                    Due {selectedProject.due}
+                  </Badge>
+                ) : null}
+                {selectedProject.documentName ? (
+                  <Badge className="border-slate-200 bg-white text-slate-700">
+                    <FileText className="size-3.5" />
+                    {selectedProject.documentName}
+                  </Badge>
+                ) : null}
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={() => listInputRef.current?.click()}>
+                <Users />
+                Add list
+              </Button>
               <Button variant="outline" onClick={() => formInputRef.current?.click()}>
                 <UploadCloud />
-                Upload form
+                Add form
               </Button>
-              <Button variant="outline" onClick={() => setDialog("redline")}>
-                <Eye />
-                Redlines
-              </Button>
-              <Button variant="accent" onClick={openBrief}>
-                <Sparkles />
-                AI brief
-              </Button>
+              {projectReady ? (
+                <Button onClick={() => openEmail("all")}>
+                  <Send />
+                  Send
+                </Button>
+              ) : null}
             </div>
           </div>
-          <div className="mt-4 flex gap-1 border-b border-transparent">
-            {(["overview", "documents", "activity"] as TabId[]).map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={cn(
-                  "rounded-md px-3 py-2 text-sm font-medium capitalize transition",
-                  activeTab === tab ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-100",
-                )}
-              >
-                {tab}
-              </button>
-            ))}
-          </div>
+          {projectReady ? (
+            <div className="mt-4 flex gap-1 border-b border-transparent">
+              {(["overview", "documents", "activity"] as TabId[]).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={cn(
+                    "rounded-md px-3 py-2 text-sm font-medium capitalize transition",
+                    activeTab === tab ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-100",
+                  )}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </header>
 
         <section className="workspace-content">
-          {activeTab === "overview" ? (
+          {!projectReady ? (
+            <ProjectSetup
+              project={selectedProject}
+              onAddList={() => listInputRef.current?.click()}
+              onAddForm={() => formInputRef.current?.click()}
+              onAddInstructions={openBrief}
+            />
+          ) : null}
+          {projectReady && activeTab === "overview" ? (
             <Overview
               selectedProject={selectedProject}
               selectedParty={selectedParty}
-              acceptedPercent={percent(acceptedCount, selectedProject.parties.length)}
-              responsePercent={percent(responseCount, selectedProject.parties.length)}
+              onSelectParty={setSelectedPartyId}
+              onAddParty={() => setDialog("party")}
+              onEditAuthority={openBrief}
               onOpenRedlines={() => setDialog("redline")}
               onQueueEmail={() => openEmail("selected")}
               onChangeStatus={updatePartyStatus}
             />
           ) : null}
-          {activeTab === "documents" ? (
+          {projectReady && activeTab === "documents" ? (
             <Documents selectedProject={selectedProject} onUpload={() => formInputRef.current?.click()} />
           ) : null}
-          {activeTab === "activity" ? <ActivityLog selectedProject={selectedProject} /> : null}
+          {projectReady && activeTab === "activity" ? <ActivityLog selectedProject={selectedProject} /> : null}
         </section>
       </main>
 
@@ -1063,24 +969,10 @@ export function PrexetWorkspace() {
         open={dialog === "project"}
         onClose={() => setDialog(null)}
         title="New project"
-        description="Create the shell for a form document, party list, and AI review authority."
+        description="Give the project a name. You can add everything else next."
       >
         <form className="space-y-4 p-6" onSubmit={handleCreateProject}>
-          <Field name="title" label="Project name" placeholder="Project or agreement name" required />
-          <div className="grid grid-cols-2 gap-3">
-            <Field name="reference" label="Reference" placeholder="PX-2026-01" />
-            <Field name="due" label="Due date" placeholder="Aug 15" />
-          </div>
-          <Field name="documentName" label="Form document" placeholder="Form_Agreement.docx" />
-          <label className="block">
-            <span className="text-sm font-medium text-slate-700">AI authority</span>
-            <textarea
-              name="guardrails"
-              rows={4}
-              className="mt-1 w-full rounded-lg border border-[var(--border)] px-3 py-2 text-sm outline-none focus:border-[var(--ring)]"
-              placeholder="Accept typo fixes. Reject economic changes without approval."
-            />
-          </label>
+          <Field name="title" label="Project name" placeholder="Morrison Plaza access agreement" autoFocus required />
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setDialog(null)}>Cancel</Button>
             <Button type="submit">Create project</Button>
@@ -1192,19 +1084,112 @@ export function PrexetWorkspace() {
   );
 }
 
+function ProjectSetup({
+  project,
+  onAddList,
+  onAddForm,
+  onAddInstructions,
+}: {
+  project: Project;
+  onAddList: () => void;
+  onAddForm: () => void;
+  onAddInstructions: () => void;
+}) {
+  const listAdded = project.parties.length > 0;
+  const formAdded = Boolean(project.documentName);
+  const instructionsAdded = project.guardrails.length > 0;
+
+  return (
+    <div className="project-setup">
+      <div className="project-setup-intro">
+        <p className="eyebrow">Project setup</p>
+        <h2>What does this project need?</h2>
+        <p>Add the recipients and the form they should review. Instructions for AI review are optional.</p>
+      </div>
+
+      <div className="project-setup-list">
+        <SetupItem
+          icon={Users}
+          title="Recipient list"
+          description={listAdded ? `${project.parties.length} parties added` : "Upload a CSV or Excel file of names and email addresses."}
+          complete={listAdded}
+          actionLabel={listAdded ? "Replace list" : "Add list"}
+          onAction={onAddList}
+        />
+        <SetupItem
+          icon={FileText}
+          title="Form document"
+          description={formAdded ? project.documentName : "Upload the Word form that every party will receive."}
+          complete={formAdded}
+          actionLabel={formAdded ? "Replace form" : "Add form"}
+          onAction={onAddForm}
+        />
+        <SetupItem
+          icon={Sparkles}
+          title="AI review instructions"
+          description={instructionsAdded ? `${project.guardrails.length} instructions saved` : "Describe what can be accepted and what should be escalated."}
+          complete={instructionsAdded}
+          optional
+          actionLabel={instructionsAdded ? "Edit" : "Add instructions"}
+          onAction={onAddInstructions}
+        />
+      </div>
+
+      {!listAdded || !formAdded ? (
+        <p className="project-setup-note">Add a recipient list and form document to open the project workspace.</p>
+      ) : null}
+    </div>
+  );
+}
+
+function SetupItem({
+  icon: Icon,
+  title,
+  description,
+  complete,
+  optional = false,
+  actionLabel,
+  onAction,
+}: {
+  icon: typeof Users;
+  title: string;
+  description: string;
+  complete: boolean;
+  optional?: boolean;
+  actionLabel: string;
+  onAction: () => void;
+}) {
+  return (
+    <div className="setup-item">
+      <div className="setup-item-icon"><Icon /></div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3>{title}</h3>
+          {complete ? <span className="setup-state">Added</span> : null}
+          {optional && !complete ? <span className="setup-optional">Optional</span> : null}
+        </div>
+        <p>{description}</p>
+      </div>
+      <Button variant={complete ? "ghost" : "outline"} onClick={onAction}>{actionLabel}</Button>
+    </div>
+  );
+}
+
 function Overview({
   selectedProject,
   selectedParty,
-  acceptedPercent,
-  responsePercent,
+  onSelectParty,
+  onAddParty,
+  onEditAuthority,
   onOpenRedlines,
   onQueueEmail,
   onChangeStatus,
 }: {
   selectedProject: Project;
   selectedParty?: Party;
-  acceptedPercent: number;
-  responsePercent: number;
+  onSelectParty: (partyId: string) => void;
+  onAddParty: () => void;
+  onEditAuthority: () => void;
   onOpenRedlines: () => void;
   onQueueEmail: () => void;
   onChangeStatus: (status: PartyStatus) => void;
@@ -1213,14 +1198,31 @@ function Overview({
     <div className="overview-grid">
       <div className="space-y-5">
         <section className="panel">
-          <div className="grid gap-4 md:grid-cols-3">
-            <Metric icon={Users} label="Parties" value={selectedProject.parties.length} detail={`${responsePercent}% responded`} />
-            <Metric icon={CheckCircle2} label="Accepted" value={`${acceptedPercent}%`} detail="Within authority" />
-            <Metric icon={Clock3} label="Deadline" value={selectedProject.due} detail={selectedProject.round} />
+          <div className="panel-title">
+            <div>
+              <p className="eyebrow">Parties</p>
+              <h2>{selectedProject.parties.length} recipients</h2>
+            </div>
+            <Button variant="outline" size="sm" onClick={onAddParty}>
+              <UserPlus />
+              Add party
+            </Button>
           </div>
-          <div className="mt-5 grid gap-4 md:grid-cols-2">
-            <ProgressBlock label="Response rate" value={responsePercent} />
-            <ProgressBlock label="Accepted without escalation" value={acceptedPercent} />
+          <div className="party-directory mt-4">
+            {selectedProject.parties.map((party) => (
+              <button
+                key={party.id}
+                onClick={() => onSelectParty(party.id)}
+                className={cn("party-directory-row", selectedParty?.id === party.id && "is-selected")}
+              >
+                <Avatar className="size-8 bg-zinc-100">{party.initials}</Avatar>
+                <span className="min-w-0 flex-1 text-left">
+                  <span className="block truncate text-sm font-medium text-zinc-950">{party.company}</span>
+                  <span className="block truncate text-xs text-zinc-500">{party.name}</span>
+                </span>
+                <Badge className={statusMeta[party.status].tone}>{statusMeta[party.status].label}</Badge>
+              </button>
+            ))}
           </div>
         </section>
 
@@ -1230,19 +1232,23 @@ function Overview({
               <p className="eyebrow">AI summary</p>
               <h2>Project position</h2>
             </div>
-            <Badge className="border-zinc-300 bg-zinc-100 text-zinc-800">
-              <Bot className="size-3.5" />
-              Guardrails applied
-            </Badge>
+            <Button variant="ghost" size="sm" onClick={onEditAuthority}>
+              <Sparkles />
+              Edit instructions
+            </Button>
           </div>
           <p className="mt-3 text-sm leading-6 text-slate-600">{selectedProject.summary}</p>
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            {selectedProject.guardrails.slice(0, 4).map((guardrail) => (
-              <div key={guardrail} className="rounded-lg border border-[var(--border)] bg-white p-3 text-sm leading-5 text-slate-700">
-                {guardrail}
-              </div>
-            ))}
-          </div>
+          {selectedProject.guardrails.length ? (
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {selectedProject.guardrails.slice(0, 4).map((guardrail) => (
+                <div key={guardrail} className="rounded-lg border border-[var(--border)] bg-white p-3 text-sm leading-5 text-slate-700">
+                  {guardrail}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-4 rounded-lg bg-zinc-50 p-3 text-sm text-zinc-500">No AI review instructions yet.</p>
+          )}
         </section>
 
         <section className="panel">
@@ -1335,19 +1341,6 @@ function Overview({
           )}
         </section>
 
-        <section className="panel">
-          <div className="panel-title">
-            <div>
-              <p className="eyebrow">Native Word path</p>
-              <h2>Professional review</h2>
-            </div>
-            <FileCheck2 className="size-4 text-[var(--accent-strong)]" />
-          </div>
-          <div className="mt-4 space-y-3 text-sm leading-6 text-slate-600">
-            <p>Prexet should preserve `.docx` files as the source of truth and use Word track changes for edits.</p>
-            <p>The browser can summarize, compare, assign status, and route decisions. A Word add-in or Office integration should handle native markup.</p>
-          </div>
-        </section>
       </aside>
     </div>
   );
@@ -1453,41 +1446,6 @@ function RedlinePreview({ expanded = false }: { expanded?: boolean }) {
         Reimbursement for access-related costs will be limited to{" "}
         <span className="insert">documented, reasonable out-of-pocket expenses</span>.
       </p>
-    </div>
-  );
-}
-
-function Metric({
-  icon: Icon,
-  label,
-  value,
-  detail,
-}: {
-  icon: typeof Users;
-  label: string;
-  value: string | number;
-  detail: string;
-}) {
-  return (
-    <div className="rounded-lg border border-[var(--border)] bg-white p-4">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
-        <Icon className="size-4 text-slate-400" />
-      </div>
-      <p className="mt-3 text-2xl font-semibold text-slate-950">{value}</p>
-      <p className="mt-1 text-xs text-slate-500">{detail}</p>
-    </div>
-  );
-}
-
-function ProgressBlock({ label, value }: { label: string; value: number }) {
-  return (
-    <div>
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
-        <p className="text-xs font-semibold text-slate-700">{value}%</p>
-      </div>
-      <Progress value={value} />
     </div>
   );
 }
