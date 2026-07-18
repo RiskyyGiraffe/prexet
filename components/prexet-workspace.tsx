@@ -14,6 +14,7 @@ import {
   Layers3,
   LoaderCircle,
   LockKeyhole,
+  LogOut,
   Mail,
   Menu,
   MessageSquareText,
@@ -40,6 +41,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { RichTextEmailEditor } from "@/components/rich-text-email-editor";
+import { authClient } from "@/lib/auth-client";
 import { cn } from "@/lib/utils";
 
 type PartyStatus = "attention" | "pending" | "accepted" | "no_response";
@@ -92,12 +94,21 @@ type EmailDraft = {
   stageId: string;
   templateId?: string;
   from: string;
+  mailboxId?: string;
   subject: string;
   bodyHtml: string;
   attachmentNames: string[];
   status: EmailDraftStatus;
   customized: boolean;
   updatedAt: string;
+};
+
+type MailboxAccount = {
+  id: string;
+  provider: MailboxProvider;
+  email: string;
+  displayName: string;
+  status: "connected" | "needs_reauth" | "revoked";
 };
 
 type Project = {
@@ -198,7 +209,7 @@ function createEmailDraft({
     partyId: party.id,
     stageId: stage.id,
     templateId: template?.id,
-    from: "Prexet delivery service (SES shell)",
+    from: "Choose a connected mailbox",
     subject: subject || template?.subject || `${project.title}: ${stage.name}`,
     bodyHtml: normalizeEmailHtml(message).replaceAll("{{first_name}}", escapeHtml(firstName)),
     attachmentNames: [...stage.documentNames],
@@ -641,6 +652,20 @@ function emptyRecipientDraft(stageId: string, index = 0): RecipientDraft {
 }
 
 export function PrexetWorkspace() {
+  const { data: session, isPending } = authClient.useSession();
+
+  if (isPending) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-white text-zinc-500">
+        <LoaderCircle className="size-5 animate-spin" />
+      </div>
+    );
+  }
+  if (!session) return <SignInScreen />;
+  return <AuthenticatedWorkspace user={session.user} />;
+}
+
+function AuthenticatedWorkspace({ user }: { user: { name: string; email: string; image?: string | null } }) {
   const [projects, setProjects] = useState<Project[]>(initialProjects);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState(initialProjects[0].id);
@@ -671,6 +696,11 @@ export function PrexetWorkspace() {
   const [toast, setToast] = useState("");
   const [projectSidebarWidth, setProjectSidebarWidth] = useState(280);
   const [projectSidebarCollapsed, setProjectSidebarCollapsed] = useState(false);
+  const [mailboxes, setMailboxes] = useState<MailboxAccount[]>([]);
+  const [mailboxesLoading, setMailboxesLoading] = useState(true);
+  const [selectedMailboxId, setSelectedMailboxId] = useState("");
+  const [documentFiles, setDocumentFiles] = useState<Record<string, File>>({});
+  const [sendBusy, setSendBusy] = useState(false);
 
   const projectSearchRef = useRef<HTMLInputElement>(null);
   const formInputRef = useRef<HTMLInputElement>(null);
@@ -718,6 +748,39 @@ export function PrexetWorkspace() {
       setProjectsLoaded(true);
     });
     return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const response = await fetch("/api/mail/accounts");
+        const result = await response.json() as { mailboxes?: MailboxAccount[] };
+        if (!cancelled && response.ok) {
+          const connected = result.mailboxes || [];
+          setMailboxes(connected);
+          setSelectedMailboxId((current) => current || connected.find((mailbox) => mailbox.status === "connected")?.id || "");
+        }
+      } finally {
+        if (!cancelled) setMailboxesLoading(false);
+      }
+    }
+    void load();
+
+    const url = new URL(window.location.href);
+    const connected = url.searchParams.get("mailbox");
+    const mailboxError = url.searchParams.get("mailbox_error");
+    const oauthMessage = mailboxError || (connected === "connected" ? "Gmail connected — it is ready to send" : "");
+    const toastTimer = oauthMessage ? window.setTimeout(() => setToast(oauthMessage), 0) : undefined;
+    if (connected || mailboxError) {
+      url.searchParams.delete("mailbox");
+      url.searchParams.delete("mailbox_error");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+    return () => {
+      cancelled = true;
+      if (toastTimer) window.clearTimeout(toastTimer);
+    };
   }, []);
 
   useEffect(() => {
@@ -910,6 +973,7 @@ export function PrexetWorkspace() {
     if (!file) return;
 
     if (kind === "form") {
+      setDocumentFiles((current) => ({ ...current, [file.name]: file }));
       const targetStageId = documentStageId || selectedProject.stages[0]?.id;
       if (!targetStageId) {
         setToast("Add a project stage before uploading a document.");
@@ -1027,6 +1091,19 @@ export function PrexetWorkspace() {
       window.location.assign(result.authorizationUrl);
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Mailbox connection is not configured yet.");
+    }
+  }
+
+  async function disconnectMailbox(mailboxId: string) {
+    try {
+      const response = await fetch(`/api/mail/accounts?id=${encodeURIComponent(mailboxId)}`, { method: "DELETE" });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "The mailbox could not be disconnected.");
+      setMailboxes((current) => current.filter((mailbox) => mailbox.id !== mailboxId));
+      setSelectedMailboxId((current) => current === mailboxId ? "" : current);
+      setToast("Mailbox disconnected");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The mailbox could not be disconnected.");
     }
   }
 
@@ -1244,6 +1321,7 @@ export function PrexetWorkspace() {
     setEditingDraftId(draft.id);
     setDraftSubject(draft.subject);
     setDraftBodyHtml(draft.bodyHtml);
+    setSelectedMailboxId(draft.mailboxId || mailboxes.find((mailbox) => mailbox.status === "connected")?.id || "");
     setDialog("draft");
   }
 
@@ -1272,33 +1350,110 @@ export function PrexetWorkspace() {
     setToast("Draft saved — nothing was sent");
   }
 
-  function saveAndQueueDraft() {
-    if (!editingDraft || !draftSubject.trim() || !draftBodyHtml.trim()) {
-      setToast("Add a subject and message before queuing.");
-      return;
+  async function sendDraftRequest(draft: EmailDraft, party: Party, subject = draft.subject, bodyHtml = draft.bodyHtml) {
+    const mailboxId = selectedMailboxId || mailboxes.find((mailbox) => mailbox.status === "connected")?.id;
+    if (!mailboxId) throw new Error("Connect a Gmail account before sending.");
+    const missingAttachments = draft.attachmentNames.filter((name) => !documentFiles[name]);
+    if (missingAttachments.length) {
+      throw new Error(`Re-upload ${missingAttachments[0]} so it can be attached before sending.`);
     }
-    saveDraft(false);
-    queueDrafts([editingDraft.id]);
+    const form = new FormData();
+    form.set("mailboxId", mailboxId);
+    form.set("to", party.email);
+    form.set("subject", subject.trim());
+    form.set("bodyHtml", bodyHtml.trim());
+    draft.attachmentNames.forEach((name) => form.append("attachments", documentFiles[name]));
+    const response = await fetch("/api/mail/send", { method: "POST", body: form });
+    const result = await response.json() as { messageId?: string; error?: string };
+    if (!response.ok || !result.messageId) throw new Error(result.error || "Gmail did not send this message.");
+    return { mailboxId, messageId: result.messageId };
   }
 
-  function queueDrafts(draftIds: string[]) {
+  async function saveAndQueueDraft() {
+    if (!editingDraft || !draftSubject.trim() || !draftBodyHtml.trim()) {
+      setToast("Add a subject and message before sending.");
+      return;
+    }
+    if (!editingDraftParty) return;
+    setSendBusy(true);
+    try {
+      const sent = await sendDraftRequest(editingDraft, editingDraftParty, draftSubject, draftBodyHtml);
+      const mailbox = mailboxes.find((item) => item.id === sent.mailboxId);
+      setProjects((current) => current.map((project) => project.id === selectedProject.id
+        ? {
+            ...project,
+            emailDrafts: project.emailDrafts.map((draft) => draft.id === editingDraft.id
+              ? {
+                  ...draft,
+                  mailboxId: sent.mailboxId,
+                  from: mailbox?.email || draft.from,
+                  subject: draftSubject.trim(),
+                  bodyHtml: draftBodyHtml.trim(),
+                  customized: true,
+                  status: "sent",
+                  updatedAt: "Just now",
+                }
+              : draft),
+            activity: [`Email sent to ${editingDraftParty.name} from ${mailbox?.email || "Gmail"}.`, ...project.activity],
+          }
+        : project));
+      setDialog(null);
+      setToast(`Email sent to ${editingDraftParty.email}`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The email could not be sent.");
+    } finally {
+      setSendBusy(false);
+    }
+  }
+
+  async function queueDrafts(draftIds: string[]) {
     const queueableIds = draftIds.filter((id) => selectedProject.emailDrafts.some((draft) => draft.id === id && draft.status !== "sent"));
     if (!queueableIds.length) {
       setToast("Select at least one draft.");
       return;
     }
-    setProjects((current) => current.map((project) => project.id === selectedProject.id
-      ? {
-          ...project,
-          emailDrafts: project.emailDrafts.map((draft) => queueableIds.includes(draft.id)
-            ? { ...draft, status: "ready", updatedAt: "Just now" }
-            : draft),
-          activity: [`${queueableIds.length} transmission ${queueableIds.length === 1 ? "email" : "emails"} queued in the delivery shell.`, ...project.activity],
-        }
-      : project));
-    setSelectedDraftIds([]);
-    setDialog(null);
-    setToast(`${queueableIds.length} ${queueableIds.length === 1 ? "email" : "emails"} queued — provider connection still required`);
+    if (!(selectedMailboxId || mailboxes.some((mailbox) => mailbox.status === "connected"))) {
+      setDialog("account");
+      setToast("Connect a Gmail account before sending.");
+      return;
+    }
+    const candidates = queueableIds.flatMap((id) => {
+      const draft = selectedProject.emailDrafts.find((item) => item.id === id);
+      const party = selectedProject.parties.find((item) => item.id === draft?.partyId);
+      return draft && party ? [{ draft, party }] : [];
+    });
+    const missing = candidates.flatMap(({ draft }) => draft.attachmentNames.filter((name) => !documentFiles[name]));
+    if (missing.length) {
+      setToast(`Re-upload ${missing[0]} before sending this batch.`);
+      return;
+    }
+    setSendBusy(true);
+    const sentIds: string[] = [];
+    let sendError = "";
+    for (const { draft, party } of candidates) {
+      try {
+        await sendDraftRequest(draft, party);
+        sentIds.push(draft.id);
+      } catch (error) {
+        sendError = error instanceof Error ? error.message : "Gmail stopped the batch.";
+        break;
+      }
+    }
+    const mailbox = mailboxes.find((item) => item.id === selectedMailboxId) || mailboxes.find((item) => item.status === "connected");
+    if (sentIds.length) {
+      setProjects((current) => current.map((project) => project.id === selectedProject.id
+        ? {
+            ...project,
+            emailDrafts: project.emailDrafts.map((draft) => sentIds.includes(draft.id)
+              ? { ...draft, status: "sent", mailboxId: mailbox?.id, from: mailbox?.email || draft.from, updatedAt: "Just now" }
+              : draft),
+            activity: [`${sentIds.length} transmission ${sentIds.length === 1 ? "email" : "emails"} sent from ${mailbox?.email || "Gmail"}.`, ...project.activity],
+          }
+        : project));
+    }
+    setSelectedDraftIds((current) => current.filter((id) => !sentIds.includes(id)));
+    setSendBusy(false);
+    setToast(sendError || `${sentIds.length} ${sentIds.length === 1 ? "email" : "emails"} sent`);
   }
 
   function saveEmailTemplate() {
@@ -1462,8 +1617,8 @@ export function PrexetWorkspace() {
               className="w-full justify-start px-2.5 text-zinc-600 hover:bg-white hover:text-black"
               onClick={() => setDialog("account")}
             >
-              <Avatar className="size-6 bg-black text-[10px] text-white">RL</Avatar>
-              <span className="rail-copy min-w-0 flex-1 truncate text-left">Ryan Lane</span>
+              <Avatar className="size-6 bg-black text-[10px] text-white">{initialsFor(user.name || user.email)}</Avatar>
+              <span className="rail-copy min-w-0 flex-1 truncate text-left">{user.name || user.email}</span>
               <Settings className="rail-copy" />
             </Button>
           </div>
@@ -1592,6 +1747,10 @@ export function PrexetWorkspace() {
           {projectReady && activeTab === "emails" ? (
             <TransmissionDrafts
               project={selectedProject}
+              mailboxes={mailboxes}
+              selectedMailboxId={selectedMailboxId}
+              sending={sendBusy}
+              onChangeMailbox={setSelectedMailboxId}
               selectedDraftIds={selectedDraftIds}
               onChangeSelection={setSelectedDraftIds}
               onOpenDraft={openDraft}
@@ -1684,6 +1843,16 @@ export function PrexetWorkspace() {
         className="max-w-2xl"
       >
         <div className="space-y-6 p-6">
+          <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-200 p-4">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-zinc-950">{user.name}</p>
+              <p className="truncate text-xs text-zinc-500">{user.email}</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => void authClient.signOut()}>
+              <LogOut />
+              Sign out
+            </Button>
+          </div>
           <div>
             <p className="text-sm font-semibold text-zinc-950">Sending mailboxes</p>
             <p className="mt-1 text-sm leading-6 text-zinc-500">Access and refresh tokens are encrypted and kept on the server. Prexet requests send-only permissions.</p>
@@ -1710,15 +1879,31 @@ export function PrexetWorkspace() {
                   <p className="text-xs text-zinc-500">Microsoft 365 or Outlook.com</p>
                 </div>
               </div>
-              <Button variant="outline" className="mt-4 w-full" onClick={() => void connectMailbox("microsoft")}>
+              <Button variant="outline" className="mt-4 w-full" disabled title="Microsoft support is next">
                 <Plus />
-                Add Microsoft email
+                Microsoft coming next
               </Button>
             </div>
           </div>
           <div className="rounded-lg bg-zinc-50 p-4">
-            <p className="text-sm font-medium text-zinc-800">No mailboxes connected yet</p>
-            <p className="mt-1 text-xs leading-5 text-zinc-500">Each connected address will appear here with reconnect, default sender, and disconnect controls.</p>
+            <p className="text-sm font-medium text-zinc-800">Connected senders</p>
+            {mailboxesLoading ? (
+              <p className="mt-2 flex items-center gap-2 text-xs text-zinc-500"><LoaderCircle className="size-3.5 animate-spin" />Loading mailboxes</p>
+            ) : mailboxes.length ? (
+              <div className="mt-3 space-y-2">
+                {mailboxes.map((mailbox) => (
+                  <div key={mailbox.id} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2.5">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-zinc-900">{mailbox.email}</p>
+                      <p className="text-xs text-zinc-500">{mailbox.status === "connected" ? "Ready to send" : "Reconnect required"}</p>
+                    </div>
+                    <Button variant="ghost" size="sm" onClick={() => void disconnectMailbox(mailbox.id)}>Disconnect</Button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-1 text-xs leading-5 text-zinc-500">No mailboxes connected yet. Add Gmail to start sending.</p>
+            )}
           </div>
         </div>
       </Dialog>
@@ -2128,7 +2313,7 @@ export function PrexetWorkspace() {
         open={dialog === "draft"}
         onClose={() => setDialog(null)}
         title={editingDraftParty ? `Draft for ${editingDraftParty.name}` : "Review email draft"}
-        description="This is the exact recipient copy. Nothing sends until it is deliberately queued."
+        description="This is the exact recipient copy. Nothing sends until you click Send email."
         className="max-w-4xl"
       >
         {editingDraft && editingDraftParty ? (
@@ -2144,7 +2329,21 @@ export function PrexetWorkspace() {
             <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white">
               <div className="grid gap-px bg-zinc-200 sm:grid-cols-[110px_1fr]">
                 <div className="bg-zinc-50 px-3 py-2.5 text-xs font-medium text-zinc-500">From</div>
-                <div className="bg-white px-3 py-2.5 text-sm text-zinc-800">{editingDraft.from}</div>
+                <div className="bg-white p-2">
+                  {mailboxes.some((mailbox) => mailbox.status === "connected") ? (
+                    <select
+                      value={selectedMailboxId}
+                      onChange={(event) => setSelectedMailboxId(event.target.value)}
+                      className="h-9 w-full rounded-md border border-zinc-200 bg-white px-2.5 text-sm outline-none focus:border-black"
+                    >
+                      {mailboxes.filter((mailbox) => mailbox.status === "connected").map((mailbox) => (
+                        <option key={mailbox.id} value={mailbox.id}>{mailbox.email}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <Button variant="outline" size="sm" onClick={() => setDialog("account")}>Connect Gmail</Button>
+                  )}
+                </div>
                 <div className="bg-zinc-50 px-3 py-2.5 text-xs font-medium text-zinc-500">To</div>
                 <div className="bg-white px-3 py-2.5 text-sm text-zinc-800">
                   {editingDraftParty.name} <span className="text-zinc-500">&lt;{editingDraftParty.email}&gt;</span>
@@ -2175,21 +2374,47 @@ export function PrexetWorkspace() {
                   <div key={name} className="flex items-center gap-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5">
                     <Paperclip className="size-4 text-zinc-500" />
                     <span className="min-w-0 flex-1 truncate text-sm text-zinc-800">{name}</span>
-                    <span className="text-[11px] font-medium text-zinc-500">ATTACHED</span>
+                    <span className="text-[11px] font-medium text-zinc-500">{documentFiles[name] ? "READY" : "RE-UPLOAD"}</span>
                   </div>
                 )) : (
                   <div className="rounded-lg border border-dashed border-zinc-300 p-3 text-sm text-zinc-500">No attachments on this draft.</div>
                 )}
+                <label className="flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-300 bg-white px-3 py-2.5 text-sm font-medium text-zinc-700 hover:border-zinc-500">
+                  <UploadCloud className="size-4" />
+                  Add or re-upload attachment files
+                  <input
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={(event) => {
+                      const files = Array.from(event.currentTarget.files || []);
+                      if (!files.length) return;
+                      setDocumentFiles((current) => ({
+                        ...current,
+                        ...Object.fromEntries(files.map((file) => [file.name, file])),
+                      }));
+                      setProjects((current) => current.map((project) => project.id === selectedProject.id
+                        ? {
+                            ...project,
+                            emailDrafts: project.emailDrafts.map((draft) => draft.id === editingDraft.id
+                              ? { ...draft, attachmentNames: Array.from(new Set([...draft.attachmentNames, ...files.map((file) => file.name)])) }
+                              : draft),
+                          }
+                        : project));
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </label>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4">
-              <p className="text-xs text-zinc-500">Queueing records intent only until Gmail, Outlook, or SES is connected.</p>
+              <p className="text-xs text-zinc-500">Sending is immediate and the message appears in the connected Gmail Sent folder.</p>
               <div className="flex gap-2">
                 <Button variant="outline" onClick={() => saveDraft()}>Save draft</Button>
-                <Button onClick={saveAndQueueDraft}>
-                  <Send />
-                  Queue this email
+                <Button onClick={() => void saveAndQueueDraft()} disabled={sendBusy || !selectedMailboxId}>
+                  {sendBusy ? <LoaderCircle className="animate-spin" /> : <Send />}
+                  Send email
                 </Button>
               </div>
             </div>
@@ -2199,6 +2424,37 @@ export function PrexetWorkspace() {
 
       {toast ? <div className="toast">{toast}</div> : null}
     </div>
+  );
+}
+
+function SignInScreen() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function signInWithGoogle() {
+    setBusy(true);
+    setError("");
+    const result = await authClient.signIn.social({ provider: "google", callbackURL: "/" });
+    if (result.error) {
+      setError(result.error.message || "Google sign-in could not be started.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="grid min-h-screen place-items-center bg-zinc-50 px-5 py-12 text-zinc-950">
+      <section className="w-full max-w-sm rounded-2xl border border-zinc-200 bg-white p-7 shadow-sm">
+        <div className="grid size-10 place-items-center rounded-xl bg-black text-sm font-black text-white">px</div>
+        <h1 className="mt-6 text-2xl font-semibold tracking-tight">Sign in to Prexet</h1>
+        <p className="mt-2 text-sm leading-6 text-zinc-500">Manage projects, prepare transmission drafts, and send from your own Gmail account.</p>
+        <Button className="mt-7 w-full" size="lg" onClick={() => void signInWithGoogle()} disabled={busy}>
+          {busy ? <LoaderCircle className="animate-spin" /> : <span className="text-base font-bold">G</span>}
+          Continue with Google
+        </Button>
+        {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
+        <p className="mt-5 text-xs leading-5 text-zinc-500">Signing in identifies your Prexet account. Gmail send access is requested separately when you connect a sending mailbox.</p>
+      </section>
+    </main>
   );
 }
 
@@ -2537,6 +2793,10 @@ function Overview({
 
 function TransmissionDrafts({
   project,
+  mailboxes,
+  selectedMailboxId,
+  sending,
+  onChangeMailbox,
   selectedDraftIds,
   onChangeSelection,
   onOpenDraft,
@@ -2544,6 +2804,10 @@ function TransmissionDrafts({
   onQueueDrafts,
 }: {
   project: Project;
+  mailboxes: MailboxAccount[];
+  selectedMailboxId: string;
+  sending: boolean;
+  onChangeMailbox: (mailboxId: string) => void;
   selectedDraftIds: string[];
   onChangeSelection: (ids: string[]) => void;
   onOpenDraft: (draftId: string) => void;
@@ -2552,7 +2816,7 @@ function TransmissionDrafts({
 }) {
   const drafts = project.emailDrafts.filter((draft) => project.parties.some((party) => party.id === draft.partyId));
   const allSelected = drafts.length > 0 && drafts.every((draft) => selectedDraftIds.includes(draft.id));
-  const readyCount = drafts.filter((draft) => draft.status === "ready").length;
+  const sentCount = drafts.filter((draft) => draft.status === "sent").length;
 
   return (
     <div className="space-y-5">
@@ -2562,14 +2826,26 @@ function TransmissionDrafts({
             <p className="eyebrow">Outreach</p>
             <h2 className="mt-1 text-lg font-semibold text-zinc-950">Transmission drafts</h2>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-zinc-500">
-              Each row is a separate recipient copy. Review the subject, message, and attachments before queueing anything.
+              Each row is a separate recipient copy. Review the subject, message, and attachments before sending anything.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            {mailboxes.some((mailbox) => mailbox.status === "connected") ? (
+              <select
+                value={selectedMailboxId}
+                onChange={(event) => onChangeMailbox(event.target.value)}
+                className="h-9 rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-800 outline-none focus:border-black"
+                aria-label="Sending mailbox"
+              >
+                {mailboxes.filter((mailbox) => mailbox.status === "connected").map((mailbox) => (
+                  <option key={mailbox.id} value={mailbox.id}>From {mailbox.email}</option>
+                ))}
+              </select>
+            ) : null}
             <Button variant="outline" onClick={onCreateDrafts}><Plus />Create drafts</Button>
-            <Button onClick={() => onQueueDrafts(selectedDraftIds)} disabled={!selectedDraftIds.length}>
-              <Send />
-              Queue selected ({selectedDraftIds.length})
+            <Button onClick={() => onQueueDrafts(selectedDraftIds)} disabled={!selectedDraftIds.length || sending || !selectedMailboxId}>
+              {sending ? <LoaderCircle className="animate-spin" /> : <Send />}
+              {sending ? "Sending" : `Send selected (${selectedDraftIds.length})`}
             </Button>
           </div>
         </div>
@@ -2585,9 +2861,9 @@ function TransmissionDrafts({
             Select all {drafts.length}
           </label>
           <div className="flex items-center gap-3 text-xs text-zinc-500">
-            <span>{drafts.length - readyCount} drafts</span>
+            <span>{drafts.length - sentCount} drafts</span>
             <span className="h-1 w-1 rounded-full bg-zinc-300" />
-            <span>{readyCount} queued</span>
+            <span>{sentCount} sent</span>
           </div>
         </div>
 
@@ -2628,11 +2904,11 @@ function TransmissionDrafts({
                       </span>
                     </span>
                     <span className="mt-3 flex items-center justify-between gap-2 lg:mt-0 lg:block">
-                      <Badge className={draft.status === "ready"
+                      <Badge className={draft.status === "sent"
                         ? "border-black bg-black text-white"
                         : "border-zinc-300 bg-white text-zinc-700"}
                       >
-                        {draft.status === "ready" ? "Queued" : "Draft"}
+                        {draft.status === "sent" ? "Sent" : draft.status === "ready" ? "Ready" : "Draft"}
                       </Badge>
                       {draft.customized ? <span className="ml-2 text-[10px] font-medium text-zinc-500">CUSTOM</span> : null}
                     </span>
@@ -2654,7 +2930,7 @@ function TransmissionDrafts({
       </section>
 
       <div className="rounded-lg border border-zinc-300 bg-zinc-50 px-4 py-3 text-xs leading-5 text-zinc-600">
-        <strong className="font-semibold text-zinc-900">Delivery shell:</strong> queueing does not transmit mail yet. Gmail, Outlook, or SES must be connected before these records can become sent messages.
+        <strong className="font-semibold text-zinc-900">Before sending:</strong> each selected row sends immediately through the chosen Gmail account. Review recipient, subject, body, and attachments first.
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { exchangeAuthorizationCode, persistMailboxConnection, verifyOAuthState, type MailProvider } from "@/lib/mail-oauth";
+import { authenticatedUserId, exchangeAuthorizationCode, persistMailboxConnection, verifyOAuthState, type MailProvider } from "@/lib/mail-oauth";
 
 export const runtime = "nodejs";
 
@@ -13,6 +13,8 @@ export async function GET(request: Request, context: RouteContext<"/api/mail/cal
     if (!code || !stateValue) throw new Error(url.searchParams.get("error_description") || "The provider did not return an authorization code.");
     const state = verifyOAuthState(stateValue);
     if (state.provider !== provider) throw new Error("The mailbox provider did not match the connection request.");
+    const sessionUserId = await authenticatedUserId(request);
+    if (sessionUserId !== state.userId) throw new Error("Sign in again before connecting this mailbox.");
     const tokens = await exchangeAuthorizationCode(provider as MailProvider, code);
     await persistMailboxConnection(state.userId, provider as MailProvider, tokens);
     return Response.redirect(`${appUrl}/?mailbox=connected`);

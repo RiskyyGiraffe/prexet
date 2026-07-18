@@ -2,6 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { auth } from "@/lib/auth";
 import { encryptMailToken } from "@/lib/mail-token-crypto";
+import { createSupabaseAdminClient } from "@/lib/supabase-admin";
 
 export type MailProvider = "google" | "microsoft";
 
@@ -129,16 +130,18 @@ export async function providerMailbox(provider: MailProvider, accessToken: strin
 export async function persistMailboxConnection(userId: string, provider: MailProvider, tokens: ProviderTokens) {
   const mailbox = await providerMailbox(provider, tokens.access_token);
   const accessToken = encryptMailToken(tokens.access_token);
-  const refreshToken = tokens.refresh_token ? encryptMailToken(tokens.refresh_token) : null;
-  const response = await fetch(`${required("NEXT_PUBLIC_SUPABASE_URL")}/rest/v1/prexet_mailbox_connections?on_conflict=user_id,provider,email`, {
-    method: "POST",
-    headers: {
-      apikey: required("SUPABASE_SECRET_KEY"),
-      Authorization: `Bearer ${required("SUPABASE_SECRET_KEY")}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates,return=minimal",
-    },
-    body: JSON.stringify({
+  const refreshToken = tokens.refresh_token ? encryptMailToken(tokens.refresh_token) : undefined;
+  const supabase = createSupabaseAdminClient();
+  const { data: existing } = await supabase
+    .from("prexet_mailbox_connections")
+    .select("encrypted_refresh_token,refresh_token_iv,refresh_token_tag")
+    .eq("user_id", userId)
+    .eq("provider", provider)
+    .eq("email", mailbox.email)
+    .maybeSingle();
+  const { error } = await supabase
+    .from("prexet_mailbox_connections")
+    .upsert({
       user_id: userId,
       provider,
       provider_account_id: mailbox.providerAccountId,
@@ -147,15 +150,14 @@ export async function persistMailboxConnection(userId: string, provider: MailPro
       encrypted_access_token: accessToken.ciphertext,
       access_token_iv: accessToken.iv,
       access_token_tag: accessToken.tag,
-      encrypted_refresh_token: refreshToken?.ciphertext || null,
-      refresh_token_iv: refreshToken?.iv || null,
-      refresh_token_tag: refreshToken?.tag || null,
+      encrypted_refresh_token: refreshToken?.ciphertext || existing?.encrypted_refresh_token || null,
+      refresh_token_iv: refreshToken?.iv || existing?.refresh_token_iv || null,
+      refresh_token_tag: refreshToken?.tag || existing?.refresh_token_tag || null,
       access_token_expires_at: tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000).toISOString() : null,
       scopes: tokens.scope?.split(" ") || [],
       status: "connected",
       updated_at: new Date().toISOString(),
-    }),
-  });
-  if (!response.ok) throw new Error("The mailbox tokens could not be stored securely.");
+    }, { onConflict: "user_id,provider,email" });
+  if (error) throw new Error("The mailbox tokens could not be stored securely.");
   return mailbox;
 }

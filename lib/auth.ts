@@ -26,6 +26,13 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
   },
+  socialProviders: {
+    google: {
+      clientId: process.env.GOOGLE_MAIL_CLIENT_ID as string,
+      clientSecret: process.env.GOOGLE_MAIL_CLIENT_SECRET as string,
+      prompt: "select_account",
+    },
+  },
   user: {
     modelName: "prexet_users",
   },
