@@ -34,6 +34,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { Avatar } from "@/components/ui/avatar";
@@ -1905,6 +1906,10 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
               <p className="mt-1 text-xs leading-5 text-zinc-500">No mailboxes connected yet. Add Gmail to start sending.</p>
             )}
           </div>
+          <div className="flex items-center gap-4 text-xs text-zinc-500">
+            <Link href="/privacy" className="hover:text-black">Privacy</Link>
+            <Link href="/terms" className="hover:text-black">Terms</Link>
+          </div>
         </div>
       </Dialog>
 
@@ -2442,18 +2447,37 @@ function SignInScreen() {
   }
 
   return (
-    <main className="grid min-h-screen place-items-center bg-zinc-50 px-5 py-12 text-zinc-950">
-      <section className="w-full max-w-sm rounded-2xl border border-zinc-200 bg-white p-7 shadow-sm">
-        <div className="grid size-10 place-items-center rounded-xl bg-black text-sm font-black text-white">px</div>
-        <h1 className="mt-6 text-2xl font-semibold tracking-tight">Sign in to Prexet</h1>
-        <p className="mt-2 text-sm leading-6 text-zinc-500">Manage projects, prepare transmission drafts, and send from your own Gmail account.</p>
-        <Button className="mt-7 w-full" size="lg" onClick={() => void signInWithGoogle()} disabled={busy}>
-          {busy ? <LoaderCircle className="animate-spin" /> : <span className="text-base font-bold">G</span>}
-          Continue with Google
-        </Button>
-        {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
-        <p className="mt-5 text-xs leading-5 text-zinc-500">Signing in identifies your Prexet account. Gmail send access is requested separately when you connect a sending mailbox.</p>
-      </section>
+    <main className="h-screen overflow-y-auto bg-zinc-50 px-5 py-10 text-zinc-950">
+      <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col justify-between gap-12">
+        <header className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5 text-sm font-semibold">
+            <span className="grid size-9 place-items-center rounded-xl bg-black text-xs font-black text-white">px</span>
+            Prexet
+          </div>
+          <nav className="flex gap-4 text-xs text-zinc-500">
+            <Link href="/privacy" className="hover:text-black">Privacy</Link>
+            <Link href="/terms" className="hover:text-black">Terms</Link>
+          </nav>
+        </header>
+        <div className="grid items-center gap-12 md:grid-cols-[1fr_380px]">
+          <section>
+            <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Document workflows</p>
+            <h1 className="mt-4 max-w-xl text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">Run document outreach from one clear workspace.</h1>
+            <p className="mt-5 max-w-lg text-sm leading-7 text-zinc-600">Prexet helps professional teams manage project stages, recipients, document redlines, transmission drafts, and Gmail sending.</p>
+          </section>
+          <section className="w-full rounded-2xl border border-zinc-200 bg-white p-7 shadow-sm">
+            <h2 className="text-xl font-semibold tracking-tight">Sign in</h2>
+            <p className="mt-2 text-sm leading-6 text-zinc-500">Access your Prexet workspace.</p>
+            <Button className="mt-7 w-full" size="lg" onClick={() => void signInWithGoogle()} disabled={busy}>
+              {busy ? <LoaderCircle className="animate-spin" /> : <span className="text-base font-bold">G</span>}
+              Continue with Google
+            </Button>
+            {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
+            <p className="mt-5 text-xs leading-5 text-zinc-500">Gmail send access is requested separately only when you connect a sending mailbox.</p>
+          </section>
+        </div>
+        <footer className="text-xs text-zinc-500">© {new Date().getFullYear()} Prexet</footer>
+      </div>
     </main>
   );
 }
