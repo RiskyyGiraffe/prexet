@@ -113,8 +113,7 @@ textarea {
 }
 
 [data-project-sidebar-collapsed="true"] .rail-copy,
-[data-project-sidebar-collapsed="true"] .rail-search input,
-[data-project-sidebar-collapsed="true"] .rail-brand-mark {
+[data-project-sidebar-collapsed="true"] .rail-search input {
   display: none;
 }
 

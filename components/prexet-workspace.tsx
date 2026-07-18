@@ -41,6 +41,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
+import { PrexetMark } from "@/components/prexet-logo";
 import { RichTextEmailEditor } from "@/components/rich-text-email-editor";
 import { authClient } from "@/lib/auth-client";
 import { cn } from "@/lib/utils";
@@ -1525,8 +1526,8 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
           <div className="px-3 pb-3 pt-3">
             <div className="flex items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-2.5">
-                <div className="rail-brand-mark grid size-8 shrink-0 place-items-center rounded-lg bg-black text-xs font-black text-white">
-                  px
+                <div className="rail-brand-mark grid size-8 shrink-0 place-items-center rounded-lg border border-zinc-200 bg-white text-black">
+                  <PrexetMark className="size-5" />
                 </div>
                 <div className="rail-copy min-w-0">
                   <p className="truncate text-sm font-semibold text-black">Prexet</p>
@@ -2451,7 +2452,7 @@ function SignInScreen() {
       <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col justify-between gap-12">
         <header className="flex items-center justify-between">
           <div className="flex items-center gap-2.5 text-sm font-semibold">
-            <span className="grid size-9 place-items-center rounded-xl bg-black text-xs font-black text-white">px</span>
+            <span className="grid size-9 place-items-center rounded-xl border border-zinc-200 bg-white text-black"><PrexetMark className="size-6" /></span>
             Prexet
           </div>
           <nav className="flex gap-4 text-xs text-zinc-500">

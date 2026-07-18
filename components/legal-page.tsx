@@ -1,6 +1,8 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { PrexetBrand } from "@/components/prexet-logo";
+
 export function LegalPage({
   title,
   effectiveDate,
@@ -14,10 +16,7 @@ export function LegalPage({
     <div className="h-screen overflow-y-auto bg-white text-zinc-950">
       <header className="border-b border-zinc-200">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-6 py-5">
-          <Link href="/" className="flex items-center gap-2.5 text-sm font-semibold">
-            <span className="grid size-8 place-items-center rounded-lg bg-black text-xs font-black text-white">px</span>
-            Prexet
-          </Link>
+          <Link href="/" aria-label="Prexet home"><PrexetBrand /></Link>
           <nav className="flex items-center gap-4 text-xs text-zinc-500">
             <Link href="/privacy" className="hover:text-black">Privacy</Link>
             <Link href="/terms" className="hover:text-black">Terms</Link>
