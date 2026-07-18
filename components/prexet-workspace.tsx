@@ -11,6 +11,9 @@ import {
   FileText,
   FolderKanban,
   Inbox,
+  Layers3,
+  LoaderCircle,
+  LockKeyhole,
   Mail,
   Menu,
   MessageSquareText,
@@ -28,6 +31,7 @@ import {
   UploadCloud,
   UserPlus,
   Users,
+  X,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
@@ -35,12 +39,15 @@ import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
+import { RichTextEmailEditor } from "@/components/rich-text-email-editor";
 import { cn } from "@/lib/utils";
 
 type PartyStatus = "attention" | "pending" | "accepted" | "no_response";
-type TabId = "overview" | "documents" | "activity";
-type DialogId = "project" | "party" | "brief" | "redline" | "email" | "navigation" | null;
+type TabId = "overview" | "emails" | "documents" | "activity";
+type DialogId = "project" | "recipients" | "brief" | "redline" | "email" | "draft" | "navigation" | "stages" | "document" | "account" | null;
 type EmailAudience = "all" | "selected";
+type MailboxProvider = "google" | "microsoft";
+type EmailDraftStatus = "draft" | "ready" | "sent";
 
 type Party = {
   id: string;
@@ -53,6 +60,44 @@ type Party = {
   clauseCount: number;
   editSummary: string;
   aiPosition: string;
+  stageId?: string;
+};
+
+type ProjectStage = {
+  id: string;
+  name: string;
+  unlockAfterStageId: string | null;
+  documentNames: string[];
+};
+
+type RecipientDraft = {
+  id: string;
+  name: string;
+  email: string;
+  company: string;
+  stageId: string;
+};
+
+type EmailTemplate = {
+  id: string;
+  name: string;
+  stageId: string;
+  subject: string;
+  body: string;
+};
+
+type EmailDraft = {
+  id: string;
+  partyId: string;
+  stageId: string;
+  templateId?: string;
+  from: string;
+  subject: string;
+  bodyHtml: string;
+  attachmentNames: string[];
+  status: EmailDraftStatus;
+  customized: boolean;
+  updatedAt: string;
 };
 
 type Project = {
@@ -67,7 +112,12 @@ type Project = {
   summary: string;
   parties: Party[];
   activity: string[];
+  stages: ProjectStage[];
+  emailTemplates: EmailTemplate[];
+  emailDrafts: EmailDraft[];
 };
+
+type ProjectSeed = Omit<Project, "stages" | "emailTemplates" | "emailDrafts">;
 
 const statusOrder: PartyStatus[] = [
   "attention",
@@ -106,7 +156,59 @@ const statusMeta: Record<
   },
 };
 
-const initialProjects: Project[] = [
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function plainTextToHtml(value: string) {
+  return value
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${escapeHtml(paragraph).replaceAll("\n", "<br>")}</p>`)
+    .join("");
+}
+
+function normalizeEmailHtml(value: string) {
+  return /<\/?[a-z][\s\S]*>/i.test(value) ? value : plainTextToHtml(value);
+}
+
+function createEmailDraft({
+  project,
+  party,
+  stage,
+  template,
+  subject,
+  body,
+}: {
+  project: Pick<Project, "id" | "title" | "due">;
+  party: Party;
+  stage: ProjectStage;
+  template?: EmailTemplate;
+  subject?: string;
+  body?: string;
+}): EmailDraft {
+  const firstName = party.name.split(" ")[0] || party.name;
+  const message = body || template?.body || `Hi ${firstName},\n\nPlease review the attached materials and reply with any questions.`;
+  return {
+    id: `draft-${project.id}-${stage.id}-${party.id}`,
+    partyId: party.id,
+    stageId: stage.id,
+    templateId: template?.id,
+    from: "Prexet delivery service (SES shell)",
+    subject: subject || template?.subject || `${project.title}: ${stage.name}`,
+    bodyHtml: normalizeEmailHtml(message).replaceAll("{{first_name}}", escapeHtml(firstName)),
+    attachmentNames: [...stage.documentNames],
+    status: "draft",
+    customized: false,
+    updatedAt: "Just now",
+  };
+}
+
+const projectSeeds: ProjectSeed[] = [
   {
     id: "morrison-plaza",
     title: "Morrison Plaza Access Agreement",
@@ -327,6 +429,80 @@ const initialProjects: Project[] = [
   },
 ];
 
+const initialProjects: Project[] = projectSeeds.map((project) => {
+  const stageId = `${project.id}-review`;
+  const stage: ProjectStage = {
+    id: stageId,
+    name: project.title.includes("NDA") ? "NDA review" : "Document review",
+    unlockAfterStageId: null,
+    documentNames: project.documentName ? [project.documentName] : [],
+  };
+  const template: EmailTemplate = {
+    id: `${stageId}-initial-email`,
+    name: "Initial request",
+    stageId,
+    subject: `${project.title}: review request`,
+    body: `Please review the attached documents and return any comments by ${project.due}.`,
+  };
+  const parties = project.parties.map((party) => ({ ...party, stageId }));
+  const hydratedProject = {
+    ...project,
+    parties,
+    stages: [stage],
+    emailTemplates: [template],
+  };
+  return {
+    ...hydratedProject,
+    emailDrafts: parties.map((party) => createEmailDraft({ project: hydratedProject, party, stage, template })),
+  };
+});
+
+function normalizeProject(project: Project): Project {
+  const legacyStageId = `${project.id}-review`;
+  const stages = project.stages?.length
+    ? project.stages.map((stage, index) => ({
+        ...stage,
+        unlockAfterStageId: index ? project.stages[index - 1].id : null,
+        documentNames: stage.documentNames || [],
+      }))
+    : [{
+        id: legacyStageId,
+        name: "Stage 1",
+        unlockAfterStageId: null,
+        documentNames: project.documentName ? [project.documentName] : [],
+      }];
+  const firstStageId = stages[0]?.id;
+  const emailTemplates = project.emailTemplates?.length
+    ? project.emailTemplates
+    : firstStageId
+      ? [{
+          id: `${firstStageId}-initial-email`,
+          name: "Initial request",
+          stageId: firstStageId,
+          subject: `${project.title}: review request`,
+          body: "Please review the attached documents and reply with any questions.",
+        }]
+      : [];
+  const normalizedParties = (project.parties || []).map((party) => ({ ...party, stageId: party.stageId || firstStageId }));
+  const emailDrafts = project.emailDrafts?.length
+    ? project.emailDrafts
+    : normalizedParties.flatMap((party) => {
+        const stage = stages.find((item) => item.id === party.stageId) || stages[0];
+        if (!stage) return [];
+        const template = emailTemplates.find((item) => item.stageId === stage.id);
+        return [createEmailDraft({ project, party, stage, template })];
+      });
+  return {
+    ...project,
+    activity: project.activity || [],
+    guardrails: project.guardrails || [],
+    parties: normalizedParties,
+    stages,
+    emailTemplates,
+    emailDrafts,
+  };
+}
+
 function countByStatus(project: Project, status: PartyStatus) {
   return project.parties.filter((party) => party.status === status).length;
 }
@@ -339,6 +515,38 @@ function initialsFor(name: string) {
     .join("")
     .slice(0, 2)
     .toUpperCase();
+}
+
+function companyFromEmail(email: string) {
+  const domain = email.split("@")[1]?.split(".")[0] || "Individual";
+  return domain.replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function stageIdForParty(party: Party, project: Project) {
+  return party.stageId || project.stages[0]?.id || "";
+}
+
+function stageNameForParty(party: Party, project: Project) {
+  const stageId = stageIdForParty(party, project);
+  return project.stages.find((stage) => stage.id === stageId)?.name || "Unassigned";
+}
+
+function createParty(nameValue: string, emailValue: string, index = 0, companyValue?: string): Party {
+  const email = emailValue.trim().toLowerCase();
+  const fallbackName = email.split("@")[0].replace(/[._-]+/g, " ");
+  const name = (nameValue.trim() || fallbackName).replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return {
+    id: `party-${Date.now()}-${index}`,
+    name,
+    company: companyValue?.trim() || companyFromEmail(email),
+    email,
+    initials: initialsFor(name),
+    status: "pending",
+    lastTouch: "Just added",
+    clauseCount: 0,
+    editSummary: "Added to the recipient list. No markup returned yet.",
+    aiPosition: "Pending review.",
+  };
 }
 
 function parseCsvLine(line: string) {
@@ -366,12 +574,11 @@ function parseCsvLine(line: string) {
   return cells;
 }
 
-function partiesFromCsv(csv: string) {
-  const rows = csv
-    .split(/\r?\n/)
-    .map((line) => parseCsvLine(line))
+function partiesFromRows(inputRows: unknown[][]) {
+  const rows = inputRows
+    .map((row) => row.map((cell) => String(cell ?? "").trim()))
     .filter((row) => row.some(Boolean));
-  if (rows.length < 2) return [];
+  if (!rows.length) return [];
 
   const headers = rows[0].map((header) => header.toLowerCase().replace(/[^a-z]/g, ""));
   const column = (...names: string[]) => headers.findIndex((header) => names.includes(header));
@@ -379,36 +586,87 @@ function partiesFromCsv(csv: string) {
   const nameColumn = column("name", "fullname", "contact", "contactname");
   const companyColumn = column("company", "organization", "organisation", "firm");
 
-  if (emailColumn < 0) return [];
+  if (emailColumn < 0) {
+    return rows.flatMap((row, index) => {
+      const emailIndex = row.findIndex((cell) => cell.includes("@"));
+      if (emailIndex < 0) return [];
+      const email = row[emailIndex];
+      const name = row.find((cell, cellIndex) => cellIndex !== emailIndex && cell) || "";
+      return [createParty(name, email, index)];
+    });
+  }
 
   return rows.slice(1).flatMap((row, index) => {
     const email = row[emailColumn]?.trim();
     if (!email || !email.includes("@")) return [];
     const name = row[nameColumn]?.trim() || email.split("@")[0].replace(/[._-]+/g, " ");
-    const company = row[companyColumn]?.trim() || "Unassigned company";
-    return [{
-      id: `imported-${Date.now()}-${index}`,
-      name: name.replace(/\b\w/g, (letter) => letter.toUpperCase()),
-      company,
-      email,
-      initials: initialsFor(name),
-      status: "pending" as PartyStatus,
-      lastTouch: "Just imported",
-      clauseCount: 0,
-      editSummary: "Added from the uploaded email list. No markup returned yet.",
-      aiPosition: "Pending review.",
-    }];
+    return [createParty(name, email, index, row[companyColumn])];
   });
+}
+
+function partiesFromCsv(csv: string) {
+  return partiesFromRows(
+    csv
+      .split(/\r?\n/)
+      .map((line) => (line.includes("\t") ? line.split("\t") : parseCsvLine(line))),
+  );
+}
+
+function partiesFromPastedColumns(value: string) {
+  return partiesFromRows(
+    value
+      .split(/\r?\n/)
+      .map((line) => (line.includes("\t") ? line.split("\t") : parseCsvLine(line))),
+  );
+}
+
+function recipientDraftFromParty(party: Party): RecipientDraft {
+  return {
+    id: party.id,
+    name: party.name,
+    email: party.email,
+    company: party.company,
+    stageId: party.stageId || "",
+  };
+}
+
+function emptyRecipientDraft(stageId: string, index = 0): RecipientDraft {
+  return {
+    id: `recipient-${Date.now()}-${index}`,
+    name: "",
+    email: "",
+    company: "",
+    stageId,
+  };
 }
 
 export function PrexetWorkspace() {
   const [projects, setProjects] = useState<Project[]>(initialProjects);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState(initialProjects[0].id);
   const [selectedPartyId, setSelectedPartyId] = useState(initialProjects[0].parties[0].id);
   const [projectQuery, setProjectQuery] = useState("");
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [dialog, setDialog] = useState<DialogId>(null);
   const [emailAudience, setEmailAudience] = useState<EmailAudience>("all");
+  const [pastedRecipients, setPastedRecipients] = useState("");
+  const [recipientDrafts, setRecipientDrafts] = useState<RecipientDraft[]>([]);
+  const [stageDrafts, setStageDrafts] = useState<string[]>(["Stage 1"]);
+  const [documentStageId, setDocumentStageId] = useState("");
+  const [emailStageId, setEmailStageId] = useState("");
+  const [emailTemplateId, setEmailTemplateId] = useState("");
+  const [emailTemplateName, setEmailTemplateName] = useState("");
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBodyHtml, setEmailBodyHtml] = useState("");
+  const [emailRecipientIds, setEmailRecipientIds] = useState<string[]>([]);
+  const [selectedDraftIds, setSelectedDraftIds] = useState<string[]>([]);
+  const [editingDraftId, setEditingDraftId] = useState("");
+  const [draftSubject, setDraftSubject] = useState("");
+  const [draftBodyHtml, setDraftBodyHtml] = useState("");
+  const [redlineFile, setRedlineFile] = useState<File>();
+  const [redlineInstructions, setRedlineInstructions] = useState("");
+  const [redlineBusy, setRedlineBusy] = useState(false);
+  const [redlineError, setRedlineError] = useState("");
   const [authorityDraft, setAuthorityDraft] = useState(initialProjects[0].guardrails.join("\n"));
   const [toast, setToast] = useState("");
   const [projectSidebarWidth, setProjectSidebarWidth] = useState(280);
@@ -432,7 +690,40 @@ export function PrexetWorkspace() {
   );
 
   const attentionCount = countByStatus(selectedProject, "attention");
-  const projectReady = selectedProject.parties.length > 0 && Boolean(selectedProject.documentName);
+  const documentCount = selectedProject.stages.reduce((total, stage) => total + stage.documentNames.length, 0);
+  const projectReady = selectedProject.parties.length > 0 && selectedProject.stages.length > 0 && documentCount > 0;
+  const emailStage = selectedProject.stages.find((stage) => stage.id === emailStageId);
+  const emailStageParties = selectedProject.parties.filter((party) => stageIdForParty(party, selectedProject) === emailStageId);
+  const emailStageTemplates = selectedProject.emailTemplates.filter((template) => template.stageId === emailStageId);
+  const editingDraft = selectedProject.emailDrafts.find((draft) => draft.id === editingDraftId);
+  const editingDraftParty = selectedProject.parties.find((party) => party.id === editingDraft?.partyId);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const storedProjects = window.localStorage.getItem("prexet-projects");
+      if (storedProjects) {
+        try {
+          const parsed = JSON.parse(storedProjects) as Project[];
+          if (Array.isArray(parsed) && parsed.length) {
+            const restored = parsed.map(normalizeProject);
+            setProjects(restored);
+            setSelectedProjectId(restored[0].id);
+            setSelectedPartyId(restored[0].parties[0]?.id || "");
+            setAuthorityDraft(restored[0].guardrails.join("\n"));
+          }
+        } catch {
+          window.localStorage.removeItem("prexet-projects");
+        }
+      }
+      setProjectsLoaded(true);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    if (!projectsLoaded) return;
+    window.localStorage.setItem("prexet-projects", JSON.stringify(projects));
+  }, [projects, projectsLoaded]);
 
   useEffect(() => {
     if (!toast) return;
@@ -502,66 +793,241 @@ export function PrexetWorkspace() {
     setSelectedProjectId(project.id);
     setSelectedPartyId(project.parties[0]?.id ?? "");
     setActiveTab("overview");
+    setSelectedDraftIds([]);
     setAuthorityDraft(project.guardrails.join("\n"));
     setDialog(null);
+  }
+
+  function openRecipients() {
+    setRecipientDrafts(
+      selectedProject.parties.length
+        ? selectedProject.parties.map(recipientDraftFromParty)
+        : [emptyRecipientDraft(selectedProject.stages[0]?.id || "")],
+    );
+    setPastedRecipients("");
+    setDialog("recipients");
+  }
+
+  function mergeRecipientDrafts(recipients: Party[]) {
+    if (!recipients.length) {
+      setToast("No recipients found. Include at least a name and email address.");
+      return;
+    }
+
+    const defaultStageId = selectedProject.stages[0]?.id || "";
+    setRecipientDrafts((current) => {
+      const meaningful = current.filter((draft) => draft.name.trim() || draft.email.trim());
+      const knownEmails = new Set(meaningful.map((draft) => draft.email.trim().toLowerCase()));
+      const additions = recipients
+        .filter((party) => !knownEmails.has(party.email.toLowerCase()))
+        .map((party) => ({ ...recipientDraftFromParty(party), stageId: defaultStageId }));
+      return [...meaningful, ...additions];
+    });
+    setToast(`${recipients.length} ${recipients.length === 1 ? "row" : "rows"} added for review`);
+  }
+
+  function addPastedRecipientRows() {
+    const recipients = partiesFromPastedColumns(pastedRecipients);
+    if (!recipients.length) {
+      setToast("No email addresses found in the pasted rows.");
+      return;
+    }
+    mergeRecipientDrafts(recipients);
+    setPastedRecipients("");
+  }
+
+  function saveRecipientDrafts() {
+    const rows = recipientDrafts.filter((draft) => draft.name.trim() || draft.email.trim() || draft.company.trim());
+    const invalid = rows.find((draft) => !draft.email.includes("@"));
+    if (invalid) {
+      setToast("Every recipient needs a valid email address.");
+      return;
+    }
+
+    const seenEmails = new Set<string>();
+    const deduped = rows.filter((draft) => {
+      const email = draft.email.trim().toLowerCase();
+      if (seenEmails.has(email)) return false;
+      seenEmails.add(email);
+      return true;
+    });
+
+    let firstPartyId = "";
+    setProjects((current) => current.map((project) => {
+      if (project.id !== selectedProject.id) return project;
+      const parties = deduped.map((draft, index) => {
+        const existing = project.parties.find((party) => party.id === draft.id || party.email.toLowerCase() === draft.email.trim().toLowerCase());
+        const next = existing
+          ? {
+              ...existing,
+              name: draft.name.trim() || existing.name,
+              email: draft.email.trim().toLowerCase(),
+              company: draft.company.trim() || companyFromEmail(draft.email),
+              initials: initialsFor(draft.name.trim() || existing.name),
+              stageId: draft.stageId || project.stages[0]?.id,
+            }
+          : {
+              ...createParty(draft.name, draft.email, index, draft.company),
+              id: draft.id,
+              stageId: draft.stageId || project.stages[0]?.id,
+            };
+        if (!firstPartyId) firstPartyId = next.id;
+        return next;
+      });
+      const partyIds = new Set(parties.map((party) => party.id));
+      const retainedDrafts = project.emailDrafts.filter((draft) => partyIds.has(draft.partyId));
+      const emailDrafts = [...retainedDrafts];
+      parties.forEach((party) => {
+        const stage = project.stages.find((item) => item.id === party.stageId) || project.stages[0];
+        if (!stage) return;
+        const draftId = `draft-${project.id}-${stage.id}-${party.id}`;
+        if (!emailDrafts.some((draft) => draft.id === draftId)) {
+          emailDrafts.push(createEmailDraft({
+            project,
+            party,
+            stage,
+            template: project.emailTemplates.find((template) => template.stageId === stage.id),
+          }));
+        }
+      });
+      return {
+        ...project,
+        parties,
+        emailDrafts,
+        round: parties.length && project.documentName ? "Ready to send" : project.round,
+        summary: parties.length && project.documentName
+          ? "The recipient list and form document are ready. Add review instructions or create transmission drafts."
+          : project.summary,
+        activity: [`Recipient list updated: ${parties.length} ${parties.length === 1 ? "person" : "people"}.`, ...project.activity],
+      };
+    }));
+    setSelectedPartyId(firstPartyId);
+    setDialog(null);
+    setToast(`${deduped.length} ${deduped.length === 1 ? "recipient" : "recipients"} saved`);
   }
 
   async function handleFileSelected(kind: "form" | "list", file?: File) {
     if (!file) return;
 
     if (kind === "form") {
+      const targetStageId = documentStageId || selectedProject.stages[0]?.id;
+      if (!targetStageId) {
+        setToast("Add a project stage before uploading a document.");
+        return;
+      }
       setProjects((current) => current.map((project) => project.id === selectedProject.id
           ? {
             ...project,
             documentName: file.name,
+            stages: project.stages.map((stage) => stage.id === targetStageId
+              ? { ...stage, documentNames: Array.from(new Set([...stage.documentNames, file.name])) }
+              : stage),
+            emailDrafts: project.emailDrafts.map((draft) => draft.stageId === targetStageId && draft.status !== "sent"
+              ? { ...draft, attachmentNames: Array.from(new Set([...draft.attachmentNames, file.name])), updatedAt: "Just now" }
+              : draft),
             round: project.parties.length ? "Ready to send" : project.round,
             summary: project.parties.length
               ? "The recipient list and form document are ready. Add review instructions or send the first package."
               : project.summary,
-            activity: [`${file.name} uploaded as the current form.`, ...project.activity],
+            activity: [`${file.name} added to ${project.stages.find((stage) => stage.id === targetStageId)?.name || "the project"}.`, ...project.activity],
           }
         : project));
-      setToast(`Current form updated: ${file.name}`);
+      setDialog(null);
+      setToast(`Document added: ${file.name}`);
       return;
     }
 
-    if (!file.name.toLowerCase().endsWith(".csv")) {
-      setToast(`${file.name} staged. Excel parsing will run through the Supabase import worker.`);
-      return;
-    }
+    try {
+      const extension = file.name.split(".").pop()?.toLowerCase();
+      const supported = new Set(["csv", "tsv", "xlsx", "xls", "xlsb", "numbers", "ods"]);
+      if (!extension || !supported.has(extension)) {
+        setToast("Choose an Excel, Numbers, CSV, TSV, or OpenDocument spreadsheet.");
+        return;
+      }
 
-    const importedParties = partiesFromCsv(await file.text());
-    if (!importedParties.length) {
-      setToast("No recipients found. Include Email, Name, and Company columns.");
-      return;
-    }
+      const importedParties = extension === "csv" || extension === "tsv"
+        ? partiesFromCsv(await file.text())
+        : await (async () => {
+            const { read, utils } = await import("xlsx");
+            const workbook = read(await file.arrayBuffer());
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+            if (!sheet) return [];
+            const rows = utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: false, defval: "" });
+            return partiesFromRows(rows);
+          })();
 
-    const existingEmails = new Set(selectedProject.parties.map((party) => party.email.toLowerCase()));
-    const uniqueImports = importedParties.filter((party) => !existingEmails.has(party.email.toLowerCase()));
-    if (!uniqueImports.length) {
-      setToast("Everyone in that list is already in this project.");
-      return;
+      if (!importedParties.length) {
+        setToast("No recipients found. Include an Email column and, optionally, Name and Company.");
+        return;
+      }
+      mergeRecipientDrafts(importedParties);
+    } catch {
+      setToast("That spreadsheet could not be read. Try exporting it as Excel or CSV.");
     }
-
-    setProjects((current) => current.map((project) => {
-      if (project.id !== selectedProject.id) return project;
-      return {
-        ...project,
-        parties: [...uniqueImports, ...project.parties],
-        round: project.documentName ? "Ready to send" : project.round,
-        summary: project.documentName
-          ? "The recipient list and form document are ready. Add review instructions or send the first package."
-          : project.summary,
-        activity: [`${uniqueImports.length} parties imported from ${file.name}.`, ...project.activity],
-      };
-    }));
-    setSelectedPartyId(uniqueImports[0].id);
-    setToast(`${uniqueImports.length} recipients imported from ${file.name}`);
   }
 
   function openBrief() {
     setAuthorityDraft(selectedProject.guardrails.join("\n"));
     setDialog("brief");
+  }
+
+  function openRedlines() {
+    setRedlineFile(undefined);
+    setRedlineInstructions(selectedProject.guardrails.join("\n") || "Make only commercially reasonable, balanced changes. Preserve party names, dates, and defined terms.");
+    setRedlineError("");
+    setDialog("redline");
+  }
+
+  async function generateRedline() {
+    if (!redlineFile) {
+      setRedlineError("Choose the Word document you want Prexet to mark up.");
+      return;
+    }
+    setRedlineBusy(true);
+    setRedlineError("");
+    try {
+      const formData = new FormData();
+      formData.set("document", redlineFile);
+      formData.set("instructions", redlineInstructions);
+      const response = await fetch("/api/redline", { method: "POST", body: formData });
+      if (!response.ok) {
+        const result = await response.json() as { error?: string };
+        throw new Error(result.error || "The document could not be redlined.");
+      }
+      const blob = await response.blob();
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = `${redlineFile.name.replace(/\.docx$/i, "")}_prexet_redline.docx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(downloadUrl);
+      const changes = response.headers.get("X-Prexet-Changes") || "AI";
+      setProjects((current) => current.map((project) => project.id === selectedProject.id
+        ? { ...project, activity: [`${changes} tracked changes generated for ${redlineFile.name}.`, ...project.activity] }
+        : project));
+      setToast("Marked Word document downloaded");
+    } catch (error) {
+      setRedlineError(error instanceof Error ? error.message : "The document could not be redlined.");
+    } finally {
+      setRedlineBusy(false);
+    }
+  }
+
+  async function connectMailbox(provider: MailboxProvider) {
+    try {
+      const response = await fetch("/api/mail/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider }),
+      });
+      const result = await response.json() as { authorizationUrl?: string; error?: string };
+      if (!response.ok || !result.authorizationUrl) throw new Error(result.error || "Mailbox connection is not configured yet.");
+      window.location.assign(result.authorizationUrl);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Mailbox connection is not configured yet.");
+    }
   }
 
   function saveAuthority() {
@@ -580,20 +1046,118 @@ export function PrexetWorkspace() {
   function updatePartyStatus(status: PartyStatus) {
     if (!selectedParty) return;
     const label = statusMeta[status].label;
-    setProjects((current) => current.map((project) => project.id === selectedProject.id
-      ? {
-          ...project,
-          parties: project.parties.map((party) => party.id === selectedParty.id
-            ? { ...party, status, lastTouch: "Just now" }
-            : party),
-          activity: [`${selectedParty.company} moved to ${label.toLowerCase()}.`, ...project.activity],
-        }
-      : project));
-    setToast(`${selectedParty.company}: ${label}`);
+    const currentStageIndex = selectedProject.stages.findIndex((stage) => stage.id === stageIdForParty(selectedParty, selectedProject));
+    const nextStage = status === "accepted" ? selectedProject.stages[currentStageIndex + 1] : undefined;
+    setProjects((current) => current.map((project) => {
+      if (project.id !== selectedProject.id) return project;
+      const advancedParty = nextStage ? { ...selectedParty, stageId: nextStage.id, status: "pending" as PartyStatus } : undefined;
+      const nextDraft = nextStage && advancedParty
+        ? createEmailDraft({
+            project,
+            party: advancedParty,
+            stage: nextStage,
+            template: project.emailTemplates.find((template) => template.stageId === nextStage.id),
+          })
+        : undefined;
+      return {
+        ...project,
+        parties: project.parties.map((party) => party.id === selectedParty.id
+          ? {
+              ...party,
+              status: nextStage ? "pending" : status,
+              stageId: nextStage?.id || party.stageId,
+              lastTouch: "Just now",
+            }
+          : party),
+        emailDrafts: nextDraft && !project.emailDrafts.some((draft) => draft.id === nextDraft.id)
+          ? [nextDraft, ...project.emailDrafts]
+          : project.emailDrafts,
+        activity: [nextStage
+          ? `${selectedParty.company} completed ${selectedProject.stages[currentStageIndex]?.name} and advanced to ${nextStage.name}.`
+          : `${selectedParty.company} moved to ${label.toLowerCase()}.`, ...project.activity],
+      };
+    }));
+    setToast(nextStage
+      ? `${selectedParty.company} unlocked ${nextStage.name}`
+      : `${selectedParty.company}: ${label}`);
   }
 
-  function openEmail(audience: EmailAudience) {
+  function openStages() {
+    setStageDrafts(selectedProject.stages.length ? selectedProject.stages.map((stage) => stage.name) : ["Stage 1"]);
+    setDialog("stages");
+  }
+
+  function saveStages() {
+    const names = stageDrafts.map((name, index) => name.trim() || `Stage ${index + 1}`);
+
+    setProjects((current) => current.map((project) => {
+      if (project.id !== selectedProject.id) return project;
+      const stageSeed = Date.now();
+      const stageIds = names.map((_, index) => project.stages[index]?.id || `stage-${stageSeed}-${index}`);
+      const stages = names.map((name, index) => {
+        const existing = project.stages[index];
+        return {
+          id: stageIds[index],
+          name,
+          unlockAfterStageId: index ? stageIds[index - 1] : null,
+          documentNames: existing?.documentNames || [],
+        };
+      });
+      const validStageIds = new Set(stages.map((stage) => stage.id));
+      const emailTemplates = project.emailTemplates.filter((template) => validStageIds.has(template.stageId));
+      stages.forEach((stage) => {
+        if (!emailTemplates.some((template) => template.stageId === stage.id)) {
+          emailTemplates.push({
+            id: `${stage.id}-initial-email`,
+            name: "Initial request",
+            stageId: stage.id,
+            subject: `${project.title}: ${stage.name}`,
+            body: `Please review the attached ${stage.name.toLowerCase()} materials and reply with any questions.`,
+          });
+        }
+      });
+      return {
+        ...project,
+        stages,
+        emailTemplates,
+        parties: project.parties.map((party) => validStageIds.has(stageIdForParty(party, project))
+          ? party
+          : { ...party, stageId: stages[0].id }),
+        activity: [`Project stages updated: ${names.join(" → ")}.`, ...project.activity],
+      };
+    }));
+    setDialog(null);
+    setToast(`${names.length} ${names.length === 1 ? "stage" : "stages"} saved`);
+  }
+
+  function openDocument(stageId = selectedProject.stages[0]?.id || "") {
+    if (!selectedProject.stages.length) {
+      openStages();
+      setToast("Add stages before assigning documents.");
+      return;
+    }
+    setDocumentStageId(stageId);
+    setDialog("document");
+  }
+
+  function applyEmailTemplate(stageId: string, templateId?: string, audience: EmailAudience = emailAudience) {
+    const stageTemplates = selectedProject.emailTemplates.filter((template) => template.stageId === stageId);
+    const template = stageTemplates.find((item) => item.id === templateId) || stageTemplates[0];
+    const stageParties = selectedProject.parties.filter((party) => stageIdForParty(party, selectedProject) === stageId);
+    setEmailStageId(stageId);
+    setEmailTemplateId(template?.id || "");
+    setEmailTemplateName(template?.name || "New email form");
+    setEmailSubject(template?.subject || `${selectedProject.title}: ${selectedProject.stages.find((stage) => stage.id === stageId)?.name || "project update"}`);
+    setEmailBodyHtml(normalizeEmailHtml(template?.body || "Please review the attached materials and reply with any questions."));
+    setEmailRecipientIds(audience === "selected" && selectedParty && stageIdForParty(selectedParty, selectedProject) === stageId
+      ? [selectedParty.id]
+      : stageParties.map((party) => party.id));
+  }
+
+  function openEmail(audience: EmailAudience, stageId?: string) {
+    const targetStageId = stageId || (selectedParty ? stageIdForParty(selectedParty, selectedProject) : selectedProject.stages[0]?.id) || "";
     setEmailAudience(audience);
+    applyEmailTemplate(targetStageId, undefined, audience);
     setDialog("email");
   }
 
@@ -601,8 +1165,10 @@ export function PrexetWorkspace() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const title = String(form.get("title") || "Untitled project");
+    const projectId = `project-${Date.now()}`;
+    const stageId = `${projectId}-stage-1`;
     const newProject: Project = {
-      id: `project-${Date.now()}`,
+      id: projectId,
       title,
       reference: `PX-${new Date().getFullYear()}-${String(projects.length + 1).padStart(2, "0")}`,
       documentName: "",
@@ -613,6 +1179,15 @@ export function PrexetWorkspace() {
       summary: "Add a recipient list and form document to begin this project.",
       activity: ["Project created."],
       parties: [],
+      stages: [{ id: stageId, name: "Stage 1", unlockAfterStageId: null, documentNames: [] }],
+      emailTemplates: [{
+        id: `${stageId}-initial-email`,
+        name: "Initial request",
+        stageId,
+        subject: `${title}: review request`,
+        body: "Please review the attached documents and reply with any questions.",
+      }],
+      emailDrafts: [],
     };
     setProjects((current) => [newProject, ...current]);
     setSelectedProjectId(newProject.id);
@@ -621,47 +1196,164 @@ export function PrexetWorkspace() {
     setToast("Project created");
   }
 
-  function handleAddParty(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const name = String(form.get("name") || "New party");
-    const newParty: Party = {
-      id: `party-${Date.now()}`,
-      name,
-      company: String(form.get("company") || "Unassigned company"),
-      email: String(form.get("email") || "contact@example.com"),
-      initials: initialsFor(name),
-      status: "pending",
-      lastTouch: "Just now",
-      clauseCount: 0,
-      editSummary: "Added to the outbound list. No markup returned yet.",
-      aiPosition: "Pending review.",
-    };
-    setProjects((current) =>
-      current.map((project) =>
-        project.id === selectedProject.id
-          ? {
-              ...project,
-              activity: [`${newParty.name} added to email list.`, ...project.activity],
-              parties: [newParty, ...project.parties],
-            }
-          : project,
-      ),
-    );
-    setSelectedPartyId(newParty.id);
+  function createDraftsFromEmailForm() {
+    const recipientLabel = `${emailRecipientIds.length} ${emailRecipientIds.length === 1 ? "recipient" : "recipients"}`;
+    if (!emailRecipientIds.length) {
+      setToast("Select at least one recipient.");
+      return;
+    }
+    if (!emailStage) {
+      setToast("Choose a project stage.");
+      return;
+    }
+    const templateLabel = emailTemplateName.trim() || "Transmission email";
+    const draftIds = emailRecipientIds.map((partyId) => `draft-${selectedProject.id}-${emailStage.id}-${partyId}`);
+    setProjects((current) => current.map((project) => {
+      if (project.id !== selectedProject.id) return project;
+      const nextDrafts = [...project.emailDrafts];
+      emailRecipientIds.forEach((partyId) => {
+        const party = project.parties.find((item) => item.id === partyId);
+        if (!party) return;
+        const nextDraft = createEmailDraft({
+          project,
+          party,
+          stage: emailStage,
+          template: project.emailTemplates.find((item) => item.id === emailTemplateId),
+          subject: emailSubject,
+          body: emailBodyHtml,
+        });
+        const index = nextDrafts.findIndex((draft) => draft.id === nextDraft.id);
+        if (index >= 0) nextDrafts[index] = nextDraft;
+        else nextDrafts.unshift(nextDraft);
+      });
+      return {
+        ...project,
+        emailDrafts: nextDrafts,
+        activity: [`${templateLabel} drafts created for ${recipientLabel}.`, ...project.activity],
+      };
+    }));
+    setSelectedDraftIds(draftIds);
+    setActiveTab("emails");
     setDialog(null);
-    setToast("Party added");
+    setToast(`${recipientLabel} ready for individual review`);
   }
 
-  function queueEmail() {
-    const recipientLabel = emailAudience === "selected" && selectedParty
-      ? selectedParty.company
-      : `${selectedProject.parties.length} project parties`;
+  function openDraft(draftId: string) {
+    const draft = selectedProject.emailDrafts.find((item) => item.id === draftId);
+    if (!draft) return;
+    setEditingDraftId(draft.id);
+    setDraftSubject(draft.subject);
+    setDraftBodyHtml(draft.bodyHtml);
+    setDialog("draft");
+  }
+
+  function saveDraft(closeAfterSave = true) {
+    if (!editingDraft || !draftSubject.trim() || !draftBodyHtml.trim()) {
+      setToast("Add a subject and message before saving.");
+      return;
+    }
     setProjects((current) => current.map((project) => project.id === selectedProject.id
-      ? { ...project, activity: [`Email package queued for ${recipientLabel}.`, ...project.activity] }
+      ? {
+          ...project,
+          emailDrafts: project.emailDrafts.map((draft) => draft.id === editingDraft.id
+            ? {
+                ...draft,
+                subject: draftSubject.trim(),
+                bodyHtml: draftBodyHtml,
+                customized: true,
+                status: "draft",
+                updatedAt: "Just now",
+              }
+            : draft),
+          activity: [`Draft updated for ${editingDraftParty?.name || "recipient"}.`, ...project.activity],
+        }
       : project));
+    if (closeAfterSave) setDialog(null);
+    setToast("Draft saved — nothing was sent");
+  }
+
+  function saveAndQueueDraft() {
+    if (!editingDraft || !draftSubject.trim() || !draftBodyHtml.trim()) {
+      setToast("Add a subject and message before queuing.");
+      return;
+    }
+    saveDraft(false);
+    queueDrafts([editingDraft.id]);
+  }
+
+  function queueDrafts(draftIds: string[]) {
+    const queueableIds = draftIds.filter((id) => selectedProject.emailDrafts.some((draft) => draft.id === id && draft.status !== "sent"));
+    if (!queueableIds.length) {
+      setToast("Select at least one draft.");
+      return;
+    }
+    setProjects((current) => current.map((project) => project.id === selectedProject.id
+      ? {
+          ...project,
+          emailDrafts: project.emailDrafts.map((draft) => queueableIds.includes(draft.id)
+            ? { ...draft, status: "ready", updatedAt: "Just now" }
+            : draft),
+          activity: [`${queueableIds.length} transmission ${queueableIds.length === 1 ? "email" : "emails"} queued in the delivery shell.`, ...project.activity],
+        }
+      : project));
+    setSelectedDraftIds([]);
     setDialog(null);
-    setToast(`Email queued for ${recipientLabel} in the SES shell`);
+    setToast(`${queueableIds.length} ${queueableIds.length === 1 ? "email" : "emails"} queued — provider connection still required`);
+  }
+
+  function saveEmailTemplate() {
+    const name = emailTemplateName.trim();
+    if (!name || !emailStageId || !emailSubject.trim() || !htmlToPreviewText(emailBodyHtml)) {
+      setToast("Add a form name, subject, and message.");
+      return;
+    }
+    const templateId = emailTemplateId || `email-${Date.now()}`;
+    setProjects((current) => current.map((project) => {
+      if (project.id !== selectedProject.id) return project;
+      const template: EmailTemplate = {
+        id: templateId,
+        name,
+        stageId: emailStageId,
+        subject: emailSubject,
+        body: emailBodyHtml,
+      };
+      return {
+        ...project,
+        emailTemplates: project.emailTemplates.some((item) => item.id === templateId)
+          ? project.emailTemplates.map((item) => item.id === templateId ? template : item)
+          : [...project.emailTemplates, template],
+        activity: [`Email form saved: ${name}.`, ...project.activity],
+      };
+    }));
+    setEmailTemplateId(templateId);
+    setToast("Email form saved");
+  }
+
+  function moveSelectedParty(stageId: string) {
+    if (!selectedParty) return;
+    const targetStage = selectedProject.stages.find((stage) => stage.id === stageId);
+    const stageName = targetStage?.name || "stage";
+    setProjects((current) => current.map((project) => {
+      if (project.id !== selectedProject.id) return project;
+      const movedParty = { ...selectedParty, stageId };
+      const nextDraft = targetStage
+        ? createEmailDraft({
+            project,
+            party: movedParty,
+            stage: targetStage,
+            template: project.emailTemplates.find((template) => template.stageId === targetStage.id),
+          })
+        : undefined;
+      return {
+        ...project,
+        parties: project.parties.map((party) => party.id === selectedParty.id ? movedParty : party),
+        emailDrafts: nextDraft && !project.emailDrafts.some((draft) => draft.id === nextDraft.id)
+          ? [nextDraft, ...project.emailDrafts]
+          : project.emailDrafts,
+        activity: [`${selectedParty.company} moved to ${stageName}.`, ...project.activity],
+      };
+    }));
+    setToast(`${selectedParty.company} moved to ${stageName}`);
   }
 
   return (
@@ -765,7 +1457,11 @@ export function PrexetWorkspace() {
           </nav>
 
           <div className="border-t border-zinc-200 p-2">
-            <Button variant="ghost" className="w-full justify-start px-2.5 text-zinc-600 hover:bg-white hover:text-black">
+            <Button
+              variant="ghost"
+              className="w-full justify-start px-2.5 text-zinc-600 hover:bg-white hover:text-black"
+              onClick={() => setDialog("account")}
+            >
               <Avatar className="size-6 bg-black text-[10px] text-white">RL</Avatar>
               <span className="rail-copy min-w-0 flex-1 truncate text-left">Ryan Lane</span>
               <Settings className="rail-copy" />
@@ -829,26 +1525,26 @@ export function PrexetWorkspace() {
                 ) : null}
               </div>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" onClick={() => listInputRef.current?.click()}>
-                <Users />
-                Add list
-              </Button>
-              <Button variant="outline" onClick={() => formInputRef.current?.click()}>
-                <UploadCloud />
-                Add form
-              </Button>
-              {projectReady ? (
-                <Button onClick={() => openEmail("all")}>
-                  <Send />
-                  Send
+            {projectReady ? (
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={openRecipients}>
+                  <Users />
+                  Manage recipients
                 </Button>
-              ) : null}
-            </div>
+                <Button variant="outline" onClick={() => openDocument()}>
+                  <UploadCloud />
+                  Add document
+                </Button>
+                <Button onClick={() => openEmail("all")}>
+                  <Mail />
+                  Create drafts
+                </Button>
+              </div>
+            ) : null}
           </div>
           {projectReady ? (
             <div className="mt-4 flex gap-1 border-b border-transparent">
-              {(["overview", "documents", "activity"] as TabId[]).map((tab) => (
+              {(["overview", "emails", "documents", "activity"] as TabId[]).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
@@ -868,8 +1564,9 @@ export function PrexetWorkspace() {
           {!projectReady ? (
             <ProjectSetup
               project={selectedProject}
-              onAddList={() => listInputRef.current?.click()}
-              onAddForm={() => formInputRef.current?.click()}
+              onAddStages={openStages}
+              onAddList={openRecipients}
+              onAddForm={() => openDocument()}
               onAddInstructions={openBrief}
             />
           ) : null}
@@ -878,15 +1575,29 @@ export function PrexetWorkspace() {
               selectedProject={selectedProject}
               selectedParty={selectedParty}
               onSelectParty={setSelectedPartyId}
-              onAddParty={() => setDialog("party")}
+              onAddParty={openRecipients}
               onEditAuthority={openBrief}
-              onOpenRedlines={() => setDialog("redline")}
+              onOpenRedlines={openRedlines}
               onQueueEmail={() => openEmail("selected")}
+              onQueueStageEmail={(stageId) => openEmail("all", stageId)}
               onChangeStatus={updatePartyStatus}
+              onMoveParty={moveSelectedParty}
+              onEditStages={openStages}
+              onAddDocument={openDocument}
             />
           ) : null}
           {projectReady && activeTab === "documents" ? (
-            <Documents selectedProject={selectedProject} onUpload={() => formInputRef.current?.click()} />
+            <Documents selectedProject={selectedProject} onUpload={openDocument} />
+          ) : null}
+          {projectReady && activeTab === "emails" ? (
+            <TransmissionDrafts
+              project={selectedProject}
+              selectedDraftIds={selectedDraftIds}
+              onChangeSelection={setSelectedDraftIds}
+              onOpenDraft={openDraft}
+              onCreateDrafts={() => openEmail("all")}
+              onQueueDrafts={queueDrafts}
+            />
           ) : null}
           {projectReady && activeTab === "activity" ? <ActivityLog selectedProject={selectedProject} /> : null}
         </section>
@@ -905,7 +1616,7 @@ export function PrexetWorkspace() {
       <input
         ref={listInputRef}
         type="file"
-        accept=".csv,.xlsx"
+        accept=".csv,.tsv,.xlsx,.xls,.xlsb,.numbers,.ods"
         className="hidden"
         onChange={(event) => {
           void handleFileSelected("list", event.target.files?.[0]);
@@ -966,6 +1677,53 @@ export function PrexetWorkspace() {
       </Dialog>
 
       <Dialog
+        open={dialog === "account"}
+        onClose={() => setDialog(null)}
+        title="Account settings"
+        description="Connect more than one sending address and choose the right mailbox for each project email."
+        className="max-w-2xl"
+      >
+        <div className="space-y-6 p-6">
+          <div>
+            <p className="text-sm font-semibold text-zinc-950">Sending mailboxes</p>
+            <p className="mt-1 text-sm leading-6 text-zinc-500">Access and refresh tokens are encrypted and kept on the server. Prexet requests send-only permissions.</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-zinc-200 p-4">
+              <div className="flex items-center gap-3">
+                <div className="grid size-10 place-items-center rounded-lg bg-zinc-100 text-sm font-bold">G</div>
+                <div>
+                  <p className="text-sm font-semibold text-zinc-950">Gmail</p>
+                  <p className="text-xs text-zinc-500">Google Workspace or Gmail</p>
+                </div>
+              </div>
+              <Button variant="outline" className="mt-4 w-full" onClick={() => void connectMailbox("google")}>
+                <Plus />
+                Add Gmail
+              </Button>
+            </div>
+            <div className="rounded-xl border border-zinc-200 p-4">
+              <div className="flex items-center gap-3">
+                <div className="grid size-10 place-items-center rounded-lg bg-zinc-100 text-sm font-bold">M</div>
+                <div>
+                  <p className="text-sm font-semibold text-zinc-950">Outlook / Exchange</p>
+                  <p className="text-xs text-zinc-500">Microsoft 365 or Outlook.com</p>
+                </div>
+              </div>
+              <Button variant="outline" className="mt-4 w-full" onClick={() => void connectMailbox("microsoft")}>
+                <Plus />
+                Add Microsoft email
+              </Button>
+            </div>
+          </div>
+          <div className="rounded-lg bg-zinc-50 p-4">
+            <p className="text-sm font-medium text-zinc-800">No mailboxes connected yet</p>
+            <p className="mt-1 text-xs leading-5 text-zinc-500">Each connected address will appear here with reconnect, default sender, and disconnect controls.</p>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
         open={dialog === "project"}
         onClose={() => setDialog(null)}
         title="New project"
@@ -981,20 +1739,195 @@ export function PrexetWorkspace() {
       </Dialog>
 
       <Dialog
-        open={dialog === "party"}
+        open={dialog === "recipients"}
         onClose={() => setDialog(null)}
-        title="Add party"
-        description="Add a recipient to the current project."
+        title="Manage recipients"
+        description="Build one clean list, review every row, then save it to the project."
+        className="max-w-5xl"
       >
-        <form className="space-y-4 p-6" onSubmit={handleAddParty}>
-          <Field name="name" label="Contact name" placeholder="Jane Smith" required />
-          <Field name="company" label="Company" placeholder="Acme Legal" required />
-          <Field name="email" label="Email" type="email" placeholder="jane@example.com" required />
+        <div className="space-y-5 p-6">
+          <div className="grid gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4 lg:grid-cols-[minmax(0,1fr)_auto]">
+            <label className="block min-w-0">
+              <span className="text-sm font-medium text-zinc-900">Paste spreadsheet rows</span>
+              <span className="mt-0.5 block text-xs leading-5 text-zinc-500">Copy name and email columns from Excel, Numbers, or Google Sheets. Headers and either column order work.</span>
+              <textarea
+                value={pastedRecipients}
+                onChange={(event) => setPastedRecipients(event.target.value)}
+                rows={3}
+                className="mt-2 w-full resize-none rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs leading-5 outline-none focus:border-black"
+                placeholder={"Name\tEmail\nJane Smith\tjane@acme.com"}
+              />
+            </label>
+            <div className="flex items-end gap-2 lg:flex-col lg:items-stretch lg:justify-end">
+              <Button variant="outline" onClick={addPastedRecipientRows} disabled={!pastedRecipients.trim()}>
+                <Plus />
+                Add pasted rows
+              </Button>
+              <Button variant="outline" onClick={() => listInputRef.current?.click()}>
+                <UploadCloud />
+                Upload spreadsheet
+              </Button>
+            </div>
+          </div>
+
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-zinc-950">Recipients</p>
+                <p className="mt-0.5 text-xs text-zinc-500">Edit names, emails, companies, and stage assignments before saving.</p>
+              </div>
+              <span className="text-xs font-medium text-zinc-500">{recipientDrafts.filter((draft) => draft.email.trim()).length} ready</span>
+            </div>
+            <div className="max-h-[42vh] space-y-2 overflow-auto pr-1">
+              {recipientDrafts.map((recipient, index) => (
+                <div key={recipient.id} className="grid gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2 sm:grid-cols-[32px_minmax(130px,1fr)_minmax(190px,1.25fr)] lg:grid-cols-[32px_minmax(130px,1fr)_minmax(190px,1.25fr)_minmax(120px,.8fr)_150px_32px]">
+                  <span className="grid size-8 place-items-center rounded-md bg-white text-xs font-semibold text-zinc-500">{index + 1}</span>
+                  <input
+                    value={recipient.name}
+                    onChange={(event) => setRecipientDrafts((current) => current.map((draft) => draft.id === recipient.id ? { ...draft, name: event.target.value } : draft))}
+                    aria-label={`Recipient ${index + 1} name`}
+                    placeholder="Name"
+                    className="h-8 min-w-0 rounded-md border border-transparent bg-white px-2 text-sm outline-none focus:border-zinc-300"
+                  />
+                  <input
+                    value={recipient.email}
+                    onChange={(event) => setRecipientDrafts((current) => current.map((draft) => draft.id === recipient.id ? { ...draft, email: event.target.value } : draft))}
+                    aria-label={`Recipient ${index + 1} email`}
+                    placeholder="Email address"
+                    type="email"
+                    className="h-8 min-w-0 rounded-md border border-transparent bg-white px-2 text-sm outline-none focus:border-zinc-300"
+                  />
+                  <input
+                    value={recipient.company}
+                    onChange={(event) => setRecipientDrafts((current) => current.map((draft) => draft.id === recipient.id ? { ...draft, company: event.target.value } : draft))}
+                    aria-label={`Recipient ${index + 1} company`}
+                    placeholder="Company (optional)"
+                    className="h-8 min-w-0 rounded-md border border-transparent bg-white px-2 text-sm outline-none focus:border-zinc-300 sm:col-start-2 lg:col-start-auto"
+                  />
+                  <select
+                    value={recipient.stageId || selectedProject.stages[0]?.id || ""}
+                    onChange={(event) => setRecipientDrafts((current) => current.map((draft) => draft.id === recipient.id ? { ...draft, stageId: event.target.value } : draft))}
+                    aria-label={`Recipient ${index + 1} stage`}
+                    className="h-8 min-w-0 rounded-md border border-transparent bg-white px-2 text-xs font-medium outline-none focus:border-zinc-300"
+                  >
+                    {selectedProject.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+                  </select>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => setRecipientDrafts((current) => current.filter((draft) => draft.id !== recipient.id))}
+                    aria-label={`Remove recipient ${index + 1}`}
+                  >
+                    <X />
+                  </Button>
+                </div>
+              ))}
+              {!recipientDrafts.length ? (
+                <div className="rounded-lg border border-dashed border-zinc-300 p-6 text-center text-sm text-zinc-500">No recipients yet. Add a row, paste columns, or upload a spreadsheet.</div>
+              ) : null}
+            </div>
+            <Button
+              variant="outline"
+              className="mt-3"
+              onClick={() => setRecipientDrafts((current) => [...current, emptyRecipientDraft(selectedProject.stages[0]?.id || "", current.length)])}
+            >
+              <Plus />
+              Add recipient
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4">
+            <p className="text-xs text-zinc-500">Excel, Numbers, CSV, TSV, XLSB, and OpenDocument files are supported.</p>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setDialog(null)}>Cancel</Button>
+              <Button onClick={saveRecipientDrafts}>
+                Save recipients
+              </Button>
+              </div>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={dialog === "stages"}
+        onClose={() => setDialog(null)}
+        title="Project stages"
+        description="Title each stage once, then use it for parties, documents, and emails throughout this project."
+        className="max-w-xl"
+      >
+        <div className="space-y-4 p-6">
+          <div className="space-y-2">
+            {stageDrafts.map((stage, index) => (
+              <div key={index} className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2">
+                <span className="grid size-7 shrink-0 place-items-center rounded-md bg-white text-xs font-semibold text-zinc-500">{index + 1}</span>
+                <input
+                  value={stage}
+                  onChange={(event) => setStageDrafts((current) => current.map((value, itemIndex) => itemIndex === index ? event.target.value : value))}
+                  autoFocus={index === stageDrafts.length - 1}
+                  aria-label={`Stage ${index + 1} title`}
+                  placeholder={`Stage ${index + 1}`}
+                  className="h-9 min-w-0 flex-1 bg-transparent px-2 text-sm font-medium outline-none"
+                />
+                {stageDrafts.length > 1 ? (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => setStageDrafts((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                    aria-label={`Remove stage ${index + 1}`}
+                  >
+                    <X />
+                  </Button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          <Button
+            variant="outline"
+            onClick={() => setStageDrafts((current) => [...current, `Stage ${current.length + 1}`])}
+          >
+            <Plus />
+            Add stage
+          </Button>
+          <div className="rounded-lg bg-zinc-50 p-3 text-xs leading-5 text-zinc-600">
+            If you do nothing, the project stays in Stage 1. Parties can advance independently, while documents and email forms stay attached to their stage.
+          </div>
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setDialog(null)}>Cancel</Button>
-            <Button type="submit">Add party</Button>
+            <Button onClick={saveStages}>Save stages</Button>
           </div>
-        </form>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={dialog === "document"}
+        onClose={() => setDialog(null)}
+        title="Add document"
+        description="Choose the stage where this document becomes available."
+      >
+        <div className="space-y-5 p-6">
+          <label className="block">
+            <span className="text-sm font-medium text-zinc-800">Available in stage</span>
+            <select
+              value={documentStageId}
+              onChange={(event) => setDocumentStageId(event.target.value)}
+              className="mt-1 h-10 w-full rounded-lg border border-[var(--border)] bg-white px-3 text-sm outline-none focus:border-black"
+            >
+              {selectedProject.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+            </select>
+          </label>
+          <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50 p-6 text-center">
+            <FileText className="mx-auto size-6 text-zinc-500" />
+            <p className="mt-2 text-sm font-medium text-zinc-800">Word or PDF document</p>
+            <p className="mt-1 text-xs text-zinc-500">The original file will remain associated with this stage.</p>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setDialog(null)}>Cancel</Button>
+            <Button onClick={() => formInputRef.current?.click()}>
+              <UploadCloud />
+              Choose file
+            </Button>
+          </div>
+        </div>
       </Dialog>
 
       <Dialog
@@ -1032,51 +1965,236 @@ export function PrexetWorkspace() {
       <Dialog
         open={dialog === "redline"}
         onClose={() => setDialog(null)}
-        title="Word redline review"
-        description="Browser view is a review surface. Professional markup should remain in native Word with track changes preserved."
+        title="Generate Word redline"
+        description="Prexet reviews the document against this project's authority and returns a native Word file with tracked changes."
         className="max-w-3xl"
       >
-        <div className="p-6">
-          <RedlinePreview expanded />
+        <div className="space-y-5 p-6">
+          <label className="block rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-5 text-center">
+            <FileText className="mx-auto size-6 text-zinc-500" />
+            <span className="mt-2 block text-sm font-medium text-zinc-900">
+              {redlineFile?.name || "Choose a Word document"}
+            </span>
+            <span className="mt-1 block text-xs text-zinc-500">DOCX only · up to 10 MB</span>
+            <input
+              type="file"
+              accept=".docx"
+              className="sr-only"
+              onChange={(event) => {
+                setRedlineFile(event.target.files?.[0]);
+                setRedlineError("");
+              }}
+            />
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium text-zinc-800">Redline instructions</span>
+            <textarea
+              value={redlineInstructions}
+              onChange={(event) => setRedlineInstructions(event.target.value)}
+              rows={6}
+              className="mt-1 w-full rounded-lg border border-[var(--border)] px-3 py-2 text-sm leading-6 outline-none focus:border-black"
+              placeholder="Describe what can be accepted, rejected, or escalated."
+            />
+          </label>
+          {redlineError ? (
+            <div className="rounded-lg border border-zinc-300 bg-zinc-50 p-3 text-sm text-zinc-700">{redlineError}</div>
+          ) : null}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="max-w-md text-xs leading-5 text-zinc-500">The OpenRouter key is used only by the server. The returned document retains real Word insertions and deletions.</p>
+            <Button onClick={() => void generateRedline()} disabled={!redlineFile || redlineBusy}>
+              {redlineBusy ? <LoaderCircle className="animate-spin" /> : <Sparkles />}
+              {redlineBusy ? "Marking up…" : "Generate and download"}
+            </Button>
+          </div>
         </div>
       </Dialog>
 
       <Dialog
         open={dialog === "email"}
         onClose={() => setDialog(null)}
-        title="Email package"
-        description="This is the outbound shell that can later be backed by Amazon SES."
+        title="Create transmission drafts"
+        description="Use one standard message to create a separate reviewable draft for each selected recipient."
+        className="max-w-2xl"
       >
-        <div className="space-y-4 p-6">
-          <Field
-            label="To"
-            name="to"
-            value={emailAudience === "selected" && selectedParty
-              ? `${selectedParty.name} <${selectedParty.email}>`
-              : `${selectedProject.parties.length} project parties`}
-            readOnly
-          />
-          <Field label="Subject" name="subject" defaultValue={`${selectedProject.title}: review request`} />
-          <label className="block">
-            <span className="text-sm font-medium text-slate-700">Message</span>
-            <textarea
-              rows={5}
-              defaultValue={`Please review the attached form document and return a marked Word copy by ${selectedProject.due}.`}
-              className="mt-1 w-full rounded-lg border border-[var(--border)] px-3 py-2 text-sm outline-none focus:border-[var(--ring)]"
-            />
-          </label>
-          <div className="rounded-lg border border-[var(--border)] bg-slate-50 p-3 text-sm text-slate-600">
-            <Paperclip className="mr-2 inline size-4" />
-            {selectedProject.documentName}
+        <div className="space-y-5 p-6">
+          <div className="rounded-lg border border-zinc-300 bg-zinc-50 px-3 py-2.5 text-xs leading-5 text-zinc-600">
+            Drafts only. No email is sent from this screen. You will review the exact subject, message, attachments, and recipient copy next.
           </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setDialog(null)}>Cancel</Button>
-            <Button onClick={queueEmail}>
-              <Send />
-              Queue email
+          <label className="block">
+            <span className="text-sm font-medium text-zinc-800">From</span>
+            <div className="mt-1 flex gap-2">
+              <select className="h-10 min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-white px-3 text-sm outline-none focus:border-black">
+                <option>Prexet delivery service (SES shell)</option>
+              </select>
+              <Button variant="outline" onClick={() => setDialog("account")}>
+                <Settings />
+                Mailboxes
+              </Button>
+            </div>
+          </label>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="block">
+              <span className="text-sm font-medium text-zinc-800">Stage</span>
+              <select
+                value={emailStageId}
+                onChange={(event) => applyEmailTemplate(event.target.value, undefined, "all")}
+                className="mt-1 h-10 w-full rounded-lg border border-[var(--border)] bg-white px-3 text-sm outline-none focus:border-black"
+              >
+                {selectedProject.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-sm font-medium text-zinc-800">Email form</span>
+              <div className="mt-1 flex gap-2">
+                <select
+                  value={emailTemplateId}
+                  onChange={(event) => applyEmailTemplate(emailStageId, event.target.value, "all")}
+                  className="h-10 min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-white px-3 text-sm outline-none focus:border-black"
+                >
+                  {emailStageTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+                </select>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setEmailTemplateId("");
+                    setEmailTemplateName("New email form");
+                    setEmailSubject(`${selectedProject.title}: ${emailStage?.name || "project update"}`);
+                    setEmailBodyHtml(plainTextToHtml("Please review the attached materials and reply with any questions."));
+                  }}
+                >
+                  <Plus />
+                  New
+                </Button>
+              </div>
+            </label>
+          </div>
+
+          <Field label="Form name" name="templateName" value={emailTemplateName} onChange={(event) => setEmailTemplateName(event.target.value)} />
+          <Field label="Subject" name="subject" value={emailSubject} onChange={(event) => setEmailSubject(event.target.value)} />
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="text-sm font-medium text-zinc-800">Message</span>
+              <span className="text-xs text-zinc-500">Use {"{{first_name}}"} to personalize each copy</span>
+            </div>
+            <RichTextEmailEditor value={emailBodyHtml} onChange={setEmailBodyHtml} compact />
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm font-medium text-zinc-800">Recipients in {emailStage?.name || "stage"}</span>
+              <button
+                type="button"
+                onClick={() => setEmailRecipientIds(emailRecipientIds.length === emailStageParties.length ? [] : emailStageParties.map((party) => party.id))}
+                className="text-xs font-medium text-zinc-500 hover:text-black"
+              >
+                {emailRecipientIds.length === emailStageParties.length ? "Clear all" : "Select all"}
+              </button>
+            </div>
+            <div className="mt-2 max-h-44 overflow-auto rounded-lg border border-[var(--border)]">
+              {emailStageParties.length ? emailStageParties.map((party) => (
+                <label key={party.id} className="flex cursor-pointer items-center gap-3 border-b border-zinc-100 px-3 py-2.5 last:border-b-0 hover:bg-zinc-50">
+                  <input
+                    type="checkbox"
+                    checked={emailRecipientIds.includes(party.id)}
+                    onChange={(event) => setEmailRecipientIds((current) => event.target.checked
+                      ? [...current, party.id]
+                      : current.filter((id) => id !== party.id))}
+                    className="size-4 accent-black"
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium text-zinc-900">{party.name}</span>
+                    <span className="block truncate text-xs text-zinc-500">{party.email}</span>
+                  </span>
+                </label>
+              )) : <p className="p-4 text-sm text-zinc-500">Move parties into this stage before sending.</p>}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-[var(--border)] bg-zinc-50 p-3 text-sm text-zinc-600">
+            <Paperclip className="mr-2 inline size-4" />
+            {emailStage?.documentNames.length ? emailStage.documentNames.join(", ") : "No documents attached to this stage"}
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="outline" onClick={saveEmailTemplate}>Save form</Button>
+            <Button onClick={createDraftsFromEmailForm} disabled={!emailRecipientIds.length}>
+              <Mail />
+              Create {emailRecipientIds.length || 0} drafts
             </Button>
           </div>
         </div>
+      </Dialog>
+
+      <Dialog
+        open={dialog === "draft"}
+        onClose={() => setDialog(null)}
+        title={editingDraftParty ? `Draft for ${editingDraftParty.name}` : "Review email draft"}
+        description="This is the exact recipient copy. Nothing sends until it is deliberately queued."
+        className="max-w-4xl"
+      >
+        {editingDraft && editingDraftParty ? (
+          <div className="space-y-5 p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-black bg-black px-4 py-3 text-white">
+              <div>
+                <p className="text-xs font-bold tracking-[0.16em]">DRAFT — NOT SENT</p>
+                <p className="mt-1 text-xs text-zinc-300">Review every field below as the recipient will receive it.</p>
+              </div>
+              {editingDraft.customized ? <span className="rounded-full border border-zinc-600 px-2.5 py-1 text-[11px]">Customized</span> : null}
+            </div>
+
+            <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white">
+              <div className="grid gap-px bg-zinc-200 sm:grid-cols-[110px_1fr]">
+                <div className="bg-zinc-50 px-3 py-2.5 text-xs font-medium text-zinc-500">From</div>
+                <div className="bg-white px-3 py-2.5 text-sm text-zinc-800">{editingDraft.from}</div>
+                <div className="bg-zinc-50 px-3 py-2.5 text-xs font-medium text-zinc-500">To</div>
+                <div className="bg-white px-3 py-2.5 text-sm text-zinc-800">
+                  {editingDraftParty.name} <span className="text-zinc-500">&lt;{editingDraftParty.email}&gt;</span>
+                </div>
+                <div className="bg-zinc-50 px-3 py-2.5 text-xs font-medium text-zinc-500">Subject</div>
+                <div className="bg-white p-2">
+                  <input
+                    value={draftSubject}
+                    onChange={(event) => setDraftSubject(event.target.value)}
+                    className="h-9 w-full rounded-md border border-zinc-200 px-2.5 text-sm outline-none focus:border-black"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <span className="text-sm font-medium text-zinc-800">Message</span>
+                <span className="text-xs text-zinc-500">Formatting and pasted signatures are preserved</span>
+              </div>
+              <RichTextEmailEditor value={draftBodyHtml} onChange={setDraftBodyHtml} />
+            </div>
+
+            <div>
+              <p className="text-sm font-medium text-zinc-800">Attachments recipient will receive</p>
+              <div className="mt-2 space-y-2">
+                {editingDraft.attachmentNames.length ? editingDraft.attachmentNames.map((name) => (
+                  <div key={name} className="flex items-center gap-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5">
+                    <Paperclip className="size-4 text-zinc-500" />
+                    <span className="min-w-0 flex-1 truncate text-sm text-zinc-800">{name}</span>
+                    <span className="text-[11px] font-medium text-zinc-500">ATTACHED</span>
+                  </div>
+                )) : (
+                  <div className="rounded-lg border border-dashed border-zinc-300 p-3 text-sm text-zinc-500">No attachments on this draft.</div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4">
+              <p className="text-xs text-zinc-500">Queueing records intent only until Gmail, Outlook, or SES is connected.</p>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => saveDraft()}>Save draft</Button>
+                <Button onClick={saveAndQueueDraft}>
+                  <Send />
+                  Queue this email
+                </Button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </Dialog>
 
       {toast ? <div className="toast">{toast}</div> : null}
@@ -1086,17 +2204,21 @@ export function PrexetWorkspace() {
 
 function ProjectSetup({
   project,
+  onAddStages,
   onAddList,
   onAddForm,
   onAddInstructions,
 }: {
   project: Project;
+  onAddStages: () => void;
   onAddList: () => void;
   onAddForm: () => void;
   onAddInstructions: () => void;
 }) {
   const listAdded = project.parties.length > 0;
-  const formAdded = Boolean(project.documentName);
+  const stagesAdded = project.stages.length > 0;
+  const formCount = project.stages.reduce((total, stage) => total + stage.documentNames.length, 0);
+  const formAdded = formCount > 0;
   const instructionsAdded = project.guardrails.length > 0;
 
   return (
@@ -1104,24 +2226,32 @@ function ProjectSetup({
       <div className="project-setup-intro">
         <p className="eyebrow">Project setup</p>
         <h2>What does this project need?</h2>
-        <p>Add the recipients and the form they should review. Instructions for AI review are optional.</p>
+        <p>Set the workflow, add the parties, then attach the documents they receive at each stage.</p>
       </div>
 
       <div className="project-setup-list">
         <SetupItem
+          icon={Layers3}
+          title="Stages"
+          description={project.stages.map((stage) => stage.name).join(" → ") || "Stage 1"}
+          complete={stagesAdded}
+          actionLabel="Add stage"
+          onAction={onAddStages}
+        />
+        <SetupItem
           icon={Users}
           title="Recipient list"
-          description={listAdded ? `${project.parties.length} parties added` : "Upload a CSV or Excel file of names and email addresses."}
+          description={listAdded ? `${project.parties.length} recipients added` : "Paste rows or upload Excel, Numbers, CSV, or another spreadsheet."}
           complete={listAdded}
-          actionLabel={listAdded ? "Replace list" : "Add list"}
+          actionLabel={listAdded ? "Manage" : "Add recipients"}
           onAction={onAddList}
         />
         <SetupItem
           icon={FileText}
-          title="Form document"
-          description={formAdded ? project.documentName : "Upload the Word form that every party will receive."}
+          title="Stage documents"
+          description={formAdded ? `${formCount} ${formCount === 1 ? "document" : "documents"} assigned` : "Upload the Word or PDF documents available at a stage."}
           complete={formAdded}
-          actionLabel={formAdded ? "Replace form" : "Add form"}
+          actionLabel={formAdded ? "Add another" : "Add document"}
           onAction={onAddForm}
         />
         <SetupItem
@@ -1136,7 +2266,7 @@ function ProjectSetup({
       </div>
 
       {!listAdded || !formAdded ? (
-        <p className="project-setup-note">Add a recipient list and form document to open the project workspace.</p>
+        <p className="project-setup-note">Add recipients and the first document to continue. Stage 1 is already ready.</p>
       ) : null}
     </div>
   );
@@ -1183,7 +2313,11 @@ function Overview({
   onEditAuthority,
   onOpenRedlines,
   onQueueEmail,
+  onQueueStageEmail,
   onChangeStatus,
+  onMoveParty,
+  onEditStages,
+  onAddDocument,
 }: {
   selectedProject: Project;
   selectedParty?: Party;
@@ -1192,11 +2326,55 @@ function Overview({
   onEditAuthority: () => void;
   onOpenRedlines: () => void;
   onQueueEmail: () => void;
+  onQueueStageEmail: (stageId: string) => void;
   onChangeStatus: (status: PartyStatus) => void;
+  onMoveParty: (stageId: string) => void;
+  onEditStages: () => void;
+  onAddDocument: (stageId?: string) => void;
 }) {
   return (
     <div className="overview-grid">
       <div className="space-y-5">
+        <section className="panel">
+          <div className="panel-title">
+            <div>
+              <p className="eyebrow">Workflow</p>
+              <h2>{selectedProject.stages.length} project {selectedProject.stages.length === 1 ? "stage" : "stages"}</h2>
+            </div>
+            <Button variant="ghost" size="sm" onClick={onEditStages}>
+              <Plus />
+              Add stage
+            </Button>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {selectedProject.stages.map((stage, index) => {
+              const partyCount = selectedProject.parties.filter((party) => stageIdForParty(party, selectedProject) === stage.id).length;
+              return (
+                <div key={stage.id} className="rounded-lg border border-zinc-200 bg-zinc-50 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-zinc-500">Stage {index + 1}</p>
+                      <p className="mt-0.5 truncate text-sm font-semibold text-zinc-950">{stage.name}</p>
+                    </div>
+                    {stage.unlockAfterStageId ? <LockKeyhole className="size-4 text-zinc-400" /> : null}
+                  </div>
+                  <p className="mt-3 text-xs text-zinc-500">{partyCount} {partyCount === 1 ? "party" : "parties"} · {stage.documentNames.length} {stage.documentNames.length === 1 ? "document" : "documents"}</p>
+                  <div className="mt-3 flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => onAddDocument(stage.id)}>
+                      <Paperclip />
+                      Add file
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => onQueueStageEmail(stage.id)} disabled={!partyCount}>
+                      <Mail />
+                      Email
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
         <section className="panel">
           <div className="panel-title">
             <div>
@@ -1205,7 +2383,7 @@ function Overview({
             </div>
             <Button variant="outline" size="sm" onClick={onAddParty}>
               <UserPlus />
-              Add party
+              Add recipient
             </Button>
           </div>
           <div className="party-directory mt-4">
@@ -1217,9 +2395,10 @@ function Overview({
               >
                 <Avatar className="size-8 bg-zinc-100">{party.initials}</Avatar>
                 <span className="min-w-0 flex-1 text-left">
-                  <span className="block truncate text-sm font-medium text-zinc-950">{party.company}</span>
-                  <span className="block truncate text-xs text-zinc-500">{party.name}</span>
+                  <span className="block truncate text-sm font-medium text-zinc-950">{party.name}</span>
+                  <span className="block truncate text-xs text-zinc-500">{party.email}</span>
                 </span>
+                <span className="hidden max-w-32 truncate text-xs text-zinc-500 lg:block">{stageNameForParty(party, selectedProject)}</span>
                 <Badge className={statusMeta[party.status].tone}>{statusMeta[party.status].label}</Badge>
               </button>
             ))}
@@ -1285,6 +2464,16 @@ function Overview({
                 </div>
               </div>
               <Badge className={statusMeta[selectedParty.status].tone}>{statusMeta[selectedParty.status].label}</Badge>
+              <label className="block">
+                <span className="eyebrow">Current stage</span>
+                <select
+                  value={stageIdForParty(selectedParty, selectedProject)}
+                  onChange={(event) => onMoveParty(event.target.value)}
+                  className="mt-2 h-10 w-full rounded-lg border border-[var(--border)] bg-white px-3 text-sm outline-none focus:border-black"
+                >
+                  {selectedProject.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+                </select>
+              </label>
               <div>
                 <p className="eyebrow">Returned changes</p>
                 <p className="mt-1 text-sm leading-6 text-slate-600">{selectedParty.editSummary}</p>
@@ -1346,7 +2535,142 @@ function Overview({
   );
 }
 
-function Documents({ selectedProject, onUpload }: { selectedProject: Project; onUpload: () => void }) {
+function TransmissionDrafts({
+  project,
+  selectedDraftIds,
+  onChangeSelection,
+  onOpenDraft,
+  onCreateDrafts,
+  onQueueDrafts,
+}: {
+  project: Project;
+  selectedDraftIds: string[];
+  onChangeSelection: (ids: string[]) => void;
+  onOpenDraft: (draftId: string) => void;
+  onCreateDrafts: () => void;
+  onQueueDrafts: (draftIds: string[]) => void;
+}) {
+  const drafts = project.emailDrafts.filter((draft) => project.parties.some((party) => party.id === draft.partyId));
+  const allSelected = drafts.length > 0 && drafts.every((draft) => selectedDraftIds.includes(draft.id));
+  const readyCount = drafts.filter((draft) => draft.status === "ready").length;
+
+  return (
+    <div className="space-y-5">
+      <section className="panel overflow-hidden p-0">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-zinc-200 p-5">
+          <div>
+            <p className="eyebrow">Outreach</p>
+            <h2 className="mt-1 text-lg font-semibold text-zinc-950">Transmission drafts</h2>
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-zinc-500">
+              Each row is a separate recipient copy. Review the subject, message, and attachments before queueing anything.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={onCreateDrafts}><Plus />Create drafts</Button>
+            <Button onClick={() => onQueueDrafts(selectedDraftIds)} disabled={!selectedDraftIds.length}>
+              <Send />
+              Queue selected ({selectedDraftIds.length})
+            </Button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-5 py-3">
+          <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-zinc-700">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={() => onChangeSelection(allSelected ? [] : drafts.map((draft) => draft.id))}
+              className="size-4 accent-black"
+            />
+            Select all {drafts.length}
+          </label>
+          <div className="flex items-center gap-3 text-xs text-zinc-500">
+            <span>{drafts.length - readyCount} drafts</span>
+            <span className="h-1 w-1 rounded-full bg-zinc-300" />
+            <span>{readyCount} queued</span>
+          </div>
+        </div>
+
+        {drafts.length ? (
+          <div className="divide-y divide-zinc-200">
+            {drafts.map((draft) => {
+              const party = project.parties.find((item) => item.id === draft.partyId);
+              const stage = project.stages.find((item) => item.id === draft.stageId);
+              if (!party) return null;
+              return (
+                <div key={draft.id} className="grid grid-cols-[28px_minmax(0,1fr)] gap-3 px-5 py-4 transition hover:bg-zinc-50 lg:grid-cols-[28px_220px_minmax(0,1fr)_180px_100px]">
+                  <label className="mt-1.5 grid size-5 cursor-pointer place-items-center">
+                    <input
+                      type="checkbox"
+                      checked={selectedDraftIds.includes(draft.id)}
+                      onChange={(event) => onChangeSelection(event.target.checked
+                        ? [...selectedDraftIds, draft.id]
+                        : selectedDraftIds.filter((id) => id !== draft.id))}
+                      className="size-4 accent-black"
+                      aria-label={`Select draft for ${party.name}`}
+                    />
+                  </label>
+                  <button type="button" onClick={() => onOpenDraft(draft.id)} className="min-w-0 text-left lg:contents">
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-zinc-950">{party.name}</span>
+                      <span className="block truncate text-xs text-zinc-500">{party.email}</span>
+                      <span className="mt-1 block text-[11px] text-zinc-400 lg:hidden">{stage?.name || "Unassigned stage"}</span>
+                    </span>
+                    <span className="mt-3 block min-w-0 lg:mt-0">
+                      <span className="block truncate text-sm font-medium text-zinc-900">{draft.subject}</span>
+                      <span className="mt-1 block truncate text-xs text-zinc-500">{htmlToPreviewText(draft.bodyHtml)}</span>
+                    </span>
+                    <span className="mt-3 hidden min-w-0 lg:block">
+                      <span className="block truncate text-xs font-medium text-zinc-700">{stage?.name || "Unassigned stage"}</span>
+                      <span className="mt-1 flex items-center gap-1 truncate text-xs text-zinc-500">
+                        <Paperclip className="size-3" />
+                        {draft.attachmentNames.length ? `${draft.attachmentNames.length} attached` : "No attachments"}
+                      </span>
+                    </span>
+                    <span className="mt-3 flex items-center justify-between gap-2 lg:mt-0 lg:block">
+                      <Badge className={draft.status === "ready"
+                        ? "border-black bg-black text-white"
+                        : "border-zinc-300 bg-white text-zinc-700"}
+                      >
+                        {draft.status === "ready" ? "Queued" : "Draft"}
+                      </Badge>
+                      {draft.customized ? <span className="ml-2 text-[10px] font-medium text-zinc-500">CUSTOM</span> : null}
+                    </span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="grid min-h-64 place-items-center p-8 text-center">
+            <div>
+              <div className="mx-auto grid size-10 place-items-center rounded-lg border border-zinc-200 bg-zinc-50"><Mail className="size-4 text-zinc-500" /></div>
+              <h3 className="mt-3 text-sm font-semibold text-zinc-950">No transmission drafts yet</h3>
+              <p className="mt-1 text-sm text-zinc-500">Choose a stage email form and recipients to create individual copies.</p>
+              <Button className="mt-4" onClick={onCreateDrafts}><Plus />Create drafts</Button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <div className="rounded-lg border border-zinc-300 bg-zinc-50 px-4 py-3 text-xs leading-5 text-zinc-600">
+        <strong className="font-semibold text-zinc-900">Delivery shell:</strong> queueing does not transmit mail yet. Gmail, Outlook, or SES must be connected before these records can become sent messages.
+      </div>
+    </div>
+  );
+}
+
+function htmlToPreviewText(html: string) {
+  return html
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function Documents({ selectedProject, onUpload }: { selectedProject: Project; onUpload: (stageId?: string) => void }) {
   return (
     <div className="space-y-5">
       <section className="panel">
@@ -1355,15 +2679,37 @@ function Documents({ selectedProject, onUpload }: { selectedProject: Project; on
             <p className="eyebrow">Files</p>
             <h2>Current document package</h2>
           </div>
-          <Button variant="outline" onClick={onUpload}>
+          <Button variant="outline" onClick={() => onUpload()}>
             <UploadCloud />
             Upload
           </Button>
         </div>
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
-          <FileCard icon={FileText} title={selectedProject.documentName} detail="Form document, current version" />
-          <FileCard icon={Inbox} title="Party email list" detail={`${selectedProject.parties.length} recipients loaded`} />
-          <FileCard icon={MessageSquareText} title="AI authority prompt" detail={`${selectedProject.guardrails.length} guardrails saved`} />
+        <div className="mt-4 space-y-3">
+          {selectedProject.stages.map((stage, index) => (
+            <div key={stage.id} className="rounded-lg border border-zinc-200 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-medium text-zinc-500">Stage {index + 1}</p>
+                  <p className="text-sm font-semibold text-zinc-950">{stage.name}</p>
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => onUpload(stage.id)}><Plus />Add document</Button>
+              </div>
+              {stage.documentNames.length ? (
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  {stage.documentNames.map((documentName) => (
+                    <div key={documentName} className="flex items-center gap-3 rounded-lg bg-zinc-50 p-3">
+                      <FileText className="size-4 text-zinc-500" />
+                      <span className="min-w-0 flex-1 truncate text-sm text-zinc-800">{documentName}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : <p className="mt-3 text-sm text-zinc-500">No documents attached to this stage.</p>}
+            </div>
+          ))}
+          <div className="grid gap-3 md:grid-cols-2">
+            <FileCard icon={Inbox} title="Party email list" detail={`${selectedProject.parties.length} recipients loaded`} />
+            <FileCard icon={MessageSquareText} title="AI authority prompt" detail={`${selectedProject.guardrails.length} guardrails saved`} />
+          </div>
         </div>
       </section>
       <section className="panel">

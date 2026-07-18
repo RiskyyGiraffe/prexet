@@ -34,6 +34,28 @@ textarea {
   font: inherit;
 }
 
+.email-editor-body p {
+  margin: 0 0 0.85rem;
+}
+
+.email-editor-body p:last-child {
+  margin-bottom: 0;
+}
+
+.email-editor-body ul,
+.email-editor-body ol {
+  margin: 0.75rem 0;
+  padding-left: 1.4rem;
+}
+
+.email-editor-body ul {
+  list-style: disc;
+}
+
+.email-editor-body ol {
+  list-style: decimal;
+}
+
 .workspace-shell {
   display: grid;
   grid-template-columns: var(--project-sidebar-width, 280px) minmax(0, 1fr);
