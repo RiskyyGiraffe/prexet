@@ -653,18 +653,8 @@ function emptyRecipientDraft(stageId: string, index = 0): RecipientDraft {
   };
 }
 
-export function PrexetWorkspace() {
-  const { data: session, isPending } = authClient.useSession();
-
-  if (isPending) {
-    return (
-      <div className="grid min-h-screen place-items-center bg-white text-zinc-500">
-        <LoaderCircle className="size-5 animate-spin" />
-      </div>
-    );
-  }
-  if (!session) return <SignInScreen />;
-  return <AuthenticatedWorkspace user={session.user} />;
+export function PrexetWorkspace({ user }: { user: { name: string; email: string; image?: string | null } }) {
+  return <AuthenticatedWorkspace user={user} />;
 }
 
 function AuthenticatedWorkspace({ user }: { user: { name: string; email: string; image?: string | null } }) {
@@ -1850,7 +1840,14 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
               <p className="truncate text-sm font-semibold text-zinc-950">{user.name}</p>
               <p className="truncate text-xs text-zinc-500">{user.email}</p>
             </div>
-            <Button variant="outline" size="sm" onClick={() => void authClient.signOut()}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                await authClient.signOut();
+                window.location.assign("/");
+              }}
+            >
               <LogOut />
               Sign out
             </Button>
@@ -2430,56 +2427,6 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
 
       {toast ? <div className="toast">{toast}</div> : null}
     </div>
-  );
-}
-
-function SignInScreen() {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  async function signInWithGoogle() {
-    setBusy(true);
-    setError("");
-    const result = await authClient.signIn.social({ provider: "google", callbackURL: "/" });
-    if (result.error) {
-      setError(result.error.message || "Google sign-in could not be started.");
-      setBusy(false);
-    }
-  }
-
-  return (
-    <main className="h-screen overflow-y-auto bg-zinc-50 px-5 py-10 text-zinc-950">
-      <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col justify-between gap-12">
-        <header className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5 text-sm font-semibold">
-            <span className="grid size-9 place-items-center rounded-xl border border-zinc-200 bg-white text-black"><PrexetMark className="size-6" /></span>
-            Prexet
-          </div>
-          <nav className="flex gap-4 text-xs text-zinc-500">
-            <Link href="/privacy" className="hover:text-black">Privacy</Link>
-            <Link href="/terms" className="hover:text-black">Terms</Link>
-          </nav>
-        </header>
-        <div className="grid items-center gap-12 md:grid-cols-[1fr_380px]">
-          <section>
-            <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Document workflows</p>
-            <h1 className="mt-4 max-w-xl text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">Run document outreach from one clear workspace.</h1>
-            <p className="mt-5 max-w-lg text-sm leading-7 text-zinc-600">Prexet helps professional teams manage project stages, recipients, document redlines, transmission drafts, and Gmail sending.</p>
-          </section>
-          <section className="w-full rounded-2xl border border-zinc-200 bg-white p-7 shadow-sm">
-            <h2 className="text-xl font-semibold tracking-tight">Sign in</h2>
-            <p className="mt-2 text-sm leading-6 text-zinc-500">Access your Prexet workspace.</p>
-            <Button className="mt-7 w-full" size="lg" onClick={() => void signInWithGoogle()} disabled={busy}>
-              {busy ? <LoaderCircle className="animate-spin" /> : <span className="text-base font-bold">G</span>}
-              Continue with Google
-            </Button>
-            {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
-            <p className="mt-5 text-xs leading-5 text-zinc-500">Gmail send access is requested separately only when you connect a sending mailbox.</p>
-          </section>
-        </div>
-        <footer className="text-xs text-zinc-500">© {new Date().getFullYear()} Prexet</footer>
-      </div>
-    </main>
   );
 }
 

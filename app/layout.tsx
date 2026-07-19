@@ -13,24 +13,24 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://prexet.com"),
-  title: "prexet.com",
-  description: "Document response CRM for professional Word review workflows.",
+  metadataBase: new URL("https://www.prexet.com"),
+  title: "Prexet",
+  description: "Prexet is a document outreach and redlining workspace for managing recipients, project stages, Word documents, email drafts, and approved Gmail sends.",
   openGraph: {
-    title: "prexet.com",
-    description: "Document response, resolved.",
+    title: "Prexet",
+    description: "Document outreach, redlining, and approved email sending in one workspace.",
     type: "website",
     images: [{
       url: "/og.png",
       width: 1200,
       height: 628,
-      alt: "prexet.com — Document response, resolved.",
+      alt: "Prexet — document outreach and redlining workspace.",
     }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "prexet.com",
-    description: "Document response, resolved.",
+    title: "Prexet",
+    description: "Document outreach, redlining, and approved email sending in one workspace.",
     images: ["/og.png"],
   },
 };
