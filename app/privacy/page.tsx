@@ -9,12 +9,12 @@ export const metadata: Metadata = {
 
 export default function PrivacyPage() {
   return (
-    <LegalPage title="Privacy Policy" effectiveDate="July 18, 2026">
+    <LegalPage title="Privacy Policy" effectiveDate="July 24, 2026">
       <p>This policy explains how Prexet collects, uses, and shares information when you use our document workflow and email services.</p>
 
       <LegalSection title="Information we collect">
         <p>We collect account information such as your name, email address, and basic Google profile information; project information such as recipient details, documents, instructions, redlines, email drafts, and attachments; and technical information such as device, IP address, usage, and security logs.</p>
-        <p>If you connect Gmail, we store encrypted OAuth tokens and the Gmail address you connect. Prexet requests permission to send messages you direct us to send. We do not request permission to read your Gmail inbox.</p>
+        <p>If you connect Gmail, we store encrypted OAuth tokens and the Gmail address you connect. Sending access is used for messages you direct us to send. If you separately enable optional inbox search, Prexet also stores a searchable copy of Gmail message headers and text so you can find and ask questions about your email. Inbox search is off by default, and attachment files are not downloaded into the inbox index.</p>
       </LegalSection>
 
       <LegalSection title="How we use information">
@@ -23,7 +23,7 @@ export default function PrivacyPage() {
       </LegalSection>
 
       <LegalSection title="AI processing">
-        <p>When you request an AI feature, relevant documents, text, and instructions may be sent to an AI service provider acting for us. Do not submit information you lack authority to process.</p>
+        <p>When you request an AI feature, relevant documents, text, instructions, or a limited set of retrieved email messages may be sent to an AI service provider acting for us. Inbox questions do not send your entire mailbox to the AI provider. Do not submit information you lack authority to process.</p>
       </LegalSection>
 
       <LegalSection title="How we share information">
@@ -31,11 +31,12 @@ export default function PrivacyPage() {
       </LegalSection>
 
       <LegalSection title="Google API data">
-        <p>Prexet&apos;s use and transfer of information received from Google APIs complies with the Google API Services User Data Policy, including its Limited Use requirements. Gmail access is used only for the user-facing sending features you initiate.</p>
+        <p>Prexet&apos;s use and transfer of information received from Google APIs complies with the <a className="text-black underline underline-offset-4" href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including its Limited Use requirements. Gmail access is used only for user-facing sending and optional inbox-search features you initiate.</p>
+        <p>Inbox access is read-only. Prexet and its AI do not delete, move, archive, label, edit, or reply to Gmail messages. Prexet does not use Google user data for advertising, credit decisions, or training generalized AI models.</p>
       </LegalSection>
 
       <LegalSection title="Retention and choices">
-        <p>We retain information for as long as reasonably needed to provide the service, meet legal and security obligations, resolve disputes, and maintain backups. You may disconnect Gmail in account settings, which revokes the connection. You may request account or data deletion by contacting us.</p>
+        <p>We retain information for as long as reasonably needed to provide the service, meet legal and security obligations, resolve disputes, and maintain backups. You may turn off inbox search or disconnect Gmail in account settings. Turning off inbox search stops future synchronization and AI inbox queries; disconnecting revokes the provider connection. You may request deletion of your Prexet account or stored data by contacting us. The AI itself has no deletion capability.</p>
       </LegalSection>
 
       <LegalSection title="Security and international processing">

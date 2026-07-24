@@ -17,6 +17,11 @@ type MailboxConnectionRow = {
   refresh_token_tag: string | null;
   access_token_expires_at: string | null;
   status: "connected" | "needs_reauth" | "revoked";
+  scopes: string[];
+  inbox_access_enabled: boolean;
+  inbox_sync_status: "not_started" | "syncing" | "ready" | "error";
+  inbox_last_synced_at: string | null;
+  inbox_message_count: number;
   updated_at: string;
 };
 
@@ -26,6 +31,11 @@ export type PublicMailbox = {
   email: string;
   displayName: string;
   status: MailboxConnectionRow["status"];
+  scopes: string[];
+  inboxAccessEnabled: boolean;
+  inboxSyncStatus: MailboxConnectionRow["inbox_sync_status"];
+  inboxLastSyncedAt: string | null;
+  inboxMessageCount: number;
 };
 
 export type GmailAttachment = {
@@ -51,13 +61,18 @@ function publicMailbox(row: MailboxConnectionRow): PublicMailbox {
     email: row.email,
     displayName: row.display_name || row.email,
     status: row.status,
+    scopes: row.scopes,
+    inboxAccessEnabled: row.inbox_access_enabled,
+    inboxSyncStatus: row.inbox_sync_status,
+    inboxLastSyncedAt: row.inbox_last_synced_at,
+    inboxMessageCount: row.inbox_message_count,
   };
 }
 
 export async function listMailboxes(userId: string) {
   const { data, error } = await createSupabaseAdminClient()
     .from("prexet_mailbox_connections")
-    .select("id,provider,email,display_name,status")
+    .select("id,provider,email,display_name,status,scopes,inbox_access_enabled,inbox_sync_status,inbox_last_synced_at,inbox_message_count")
     .eq("user_id", userId)
     .neq("status", "revoked")
     .order("created_at", { ascending: true });
@@ -69,6 +84,11 @@ export async function listMailboxes(userId: string) {
     email: row.email as string,
     displayName: (row.display_name || row.email) as string,
     status: row.status as PublicMailbox["status"],
+    scopes: (row.scopes || []) as string[],
+    inboxAccessEnabled: Boolean(row.inbox_access_enabled),
+    inboxSyncStatus: (row.inbox_sync_status || "not_started") as PublicMailbox["inboxSyncStatus"],
+    inboxLastSyncedAt: row.inbox_last_synced_at as string | null,
+    inboxMessageCount: Number(row.inbox_message_count || 0),
   }));
 }
 
@@ -80,7 +100,7 @@ async function mailboxForUser(userId: string, mailboxId: string) {
     .eq("user_id", userId)
     .maybeSingle();
 
-  if (error || !data) throw new Error("That sending mailbox is not connected to your account.");
+  if (error || !data) throw new Error("That mailbox is not connected to your account.");
   return data as MailboxConnectionRow;
 }
 
@@ -94,7 +114,7 @@ async function markNeedsReauth(mailboxId: string) {
 async function refreshGoogleAccessToken(row: MailboxConnectionRow) {
   if (!row.encrypted_refresh_token || !row.refresh_token_iv || !row.refresh_token_tag) {
     await markNeedsReauth(row.id);
-    throw new Error("Reconnect this Gmail account before sending.");
+    throw new Error("Reconnect this Gmail account before continuing.");
   }
 
   const refreshToken = decryptMailToken(encryptedToken(
@@ -115,7 +135,7 @@ async function refreshGoogleAccessToken(row: MailboxConnectionRow) {
   const result = await response.json() as { access_token?: string; expires_in?: number; error_description?: string };
   if (!response.ok || !result.access_token) {
     await markNeedsReauth(row.id);
-    throw new Error(result.error_description || "Reconnect this Gmail account before sending.");
+    throw new Error(result.error_description || "Reconnect this Gmail account before continuing.");
   }
 
   const token = encryptMailToken(result.access_token);
@@ -138,7 +158,7 @@ async function refreshGoogleAccessToken(row: MailboxConnectionRow) {
 
 async function googleAccessToken(row: MailboxConnectionRow, forceRefresh = false) {
   if (row.status === "needs_reauth" || row.status === "revoked") {
-    throw new Error("Reconnect this Gmail account before sending.");
+    throw new Error("Reconnect this Gmail account before continuing.");
   }
   const expiresSoon = !row.access_token_expires_at
     || new Date(row.access_token_expires_at).getTime() <= Date.now() + 60_000;
@@ -148,6 +168,20 @@ async function googleAccessToken(row: MailboxConnectionRow, forceRefresh = false
     row.access_token_iv,
     row.access_token_tag,
   ));
+}
+
+export async function gmailReadAccess(userId: string, mailboxId: string) {
+  const row = await mailboxForUser(userId, mailboxId);
+  const readScope = "https://www.googleapis.com/auth/gmail.readonly";
+  if (row.provider !== "google") throw new Error("Inbox search currently supports Gmail only.");
+  if (!row.inbox_access_enabled || !row.scopes.includes(readScope)) {
+    throw new Error("Enable optional Gmail inbox access before syncing.");
+  }
+  return {
+    accessToken: await googleAccessToken(row),
+    mailboxId: row.id,
+    email: row.email,
+  };
 }
 
 function safeHeader(value: string) {

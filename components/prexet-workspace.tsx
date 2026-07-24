@@ -8,6 +8,7 @@ import {
   Clock3,
   Download,
   Eye,
+  ExternalLink,
   FileText,
   FolderKanban,
   Inbox,
@@ -24,6 +25,7 @@ import {
   PanelLeftOpen,
   PencilLine,
   Plus,
+  RefreshCw,
   Search,
   Send,
   Settings,
@@ -48,7 +50,7 @@ import { cn } from "@/lib/utils";
 
 type PartyStatus = "attention" | "pending" | "accepted" | "no_response";
 type TabId = "overview" | "emails" | "documents" | "activity";
-type DialogId = "project" | "recipients" | "brief" | "redline" | "email" | "draft" | "navigation" | "stages" | "document" | "account" | null;
+type DialogId = "project" | "recipients" | "brief" | "redline" | "email" | "draft" | "navigation" | "stages" | "document" | "account" | "inbox" | null;
 type EmailAudience = "all" | "selected";
 type MailboxProvider = "google" | "microsoft";
 type EmailDraftStatus = "draft" | "ready" | "sent";
@@ -111,6 +113,27 @@ type MailboxAccount = {
   email: string;
   displayName: string;
   status: "connected" | "needs_reauth" | "revoked";
+  scopes: string[];
+  inboxAccessEnabled: boolean;
+  inboxSyncStatus: "not_started" | "syncing" | "ready" | "error";
+  inboxLastSyncedAt: string | null;
+  inboxMessageCount: number;
+};
+
+type InboxSettings = {
+  onboardingCompleted: boolean;
+  enabled: boolean;
+};
+
+type InboxEvidence = {
+  id: string;
+  mailboxEmail: string;
+  from: string;
+  to: string[];
+  subject: string;
+  date: string;
+  snippet: string;
+  gmailUrl: string;
 };
 
 type Project = {
@@ -693,6 +716,20 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
   const [selectedMailboxId, setSelectedMailboxId] = useState("");
   const [documentFiles, setDocumentFiles] = useState<Record<string, File>>({});
   const [sendBusy, setSendBusy] = useState(false);
+  const [inboxSettings, setInboxSettings] = useState<InboxSettings>({
+    onboardingCompleted: true,
+    enabled: false,
+  });
+  const [showInboxOnboarding, setShowInboxOnboarding] = useState(false);
+  const [inboxOnboardingChoice, setInboxOnboardingChoice] = useState(false);
+  const [selectedInboxMailboxId, setSelectedInboxMailboxId] = useState("");
+  const [inboxSyncing, setInboxSyncing] = useState(false);
+  const [inboxSyncProgress, setInboxSyncProgress] = useState("");
+  const [inboxQuestion, setInboxQuestion] = useState("");
+  const [inboxAnswer, setInboxAnswer] = useState("");
+  const [inboxEvidence, setInboxEvidence] = useState<InboxEvidence[]>([]);
+  const [inboxBusy, setInboxBusy] = useState(false);
+  const [inboxError, setInboxError] = useState("");
 
   const projectSearchRef = useRef<HTMLInputElement>(null);
   const formInputRef = useRef<HTMLInputElement>(null);
@@ -746,12 +783,17 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
     let cancelled = false;
     async function load() {
       try {
-        const response = await fetch("/api/mail/accounts");
-        const result = await response.json() as { mailboxes?: MailboxAccount[] };
+        const response = await fetch("/api/inbox/settings");
+        const result = await response.json() as { settings?: InboxSettings; mailboxes?: MailboxAccount[] };
         if (!cancelled && response.ok) {
           const connected = result.mailboxes || [];
           setMailboxes(connected);
           setSelectedMailboxId((current) => current || connected.find((mailbox) => mailbox.status === "connected")?.id || "");
+          setSelectedInboxMailboxId((current) => current || connected.find((mailbox) => mailbox.inboxAccessEnabled)?.id || "");
+          if (result.settings) {
+            setInboxSettings(result.settings);
+            if (!result.settings.onboardingCompleted) setShowInboxOnboarding(true);
+          }
         }
       } finally {
         if (!cancelled) setMailboxesLoading(false);
@@ -762,7 +804,10 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
     const url = new URL(window.location.href);
     const connected = url.searchParams.get("mailbox");
     const mailboxError = url.searchParams.get("mailbox_error");
-    const oauthMessage = mailboxError || (connected === "connected" ? "Gmail connected — it is ready to send" : "");
+    const oauthMessage = mailboxError
+      || (connected === "inbox_connected"
+        ? "Gmail inbox search enabled — start a sync when you are ready"
+        : connected === "connected" ? "Gmail connected — it is ready to send" : "");
     const toastTimer = oauthMessage ? window.setTimeout(() => setToast(oauthMessage), 0) : undefined;
     if (connected || mailboxError) {
       url.searchParams.delete("mailbox");
@@ -1071,18 +1116,157 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
     }
   }
 
-  async function connectMailbox(provider: MailboxProvider) {
+  async function connectMailbox(provider: MailboxProvider, accessMode: "send" | "inbox" = "send") {
     try {
       const response = await fetch("/api/mail/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider }),
+        body: JSON.stringify({ provider, accessMode }),
       });
       const result = await response.json() as { authorizationUrl?: string; error?: string };
       if (!response.ok || !result.authorizationUrl) throw new Error(result.error || "Mailbox connection is not configured yet.");
       window.location.assign(result.authorizationUrl);
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Mailbox connection is not configured yet.");
+    }
+  }
+
+  async function saveInboxPreference(values: Partial<InboxSettings>) {
+    const response = await fetch("/api/inbox/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    });
+    const result = await response.json() as { settings?: InboxSettings; error?: string };
+    if (!response.ok || !result.settings) throw new Error(result.error || "Inbox preferences could not be saved.");
+    setInboxSettings(result.settings);
+    return result.settings;
+  }
+
+  async function declineInboxOnboarding() {
+    try {
+      await saveInboxPreference({ onboardingCompleted: true, enabled: false });
+      setShowInboxOnboarding(false);
+      setInboxOnboardingChoice(false);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Inbox preferences could not be saved.");
+    }
+  }
+
+  async function continueInboxOnboarding() {
+    if (!inboxOnboardingChoice) {
+      await declineInboxOnboarding();
+      return;
+    }
+    try {
+      await saveInboxPreference({ onboardingCompleted: true });
+      setShowInboxOnboarding(false);
+      await connectMailbox("google", "inbox");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Inbox access could not be started.");
+    }
+  }
+
+  async function changeInboxEnabled(enabled: boolean) {
+    if (enabled) {
+      try {
+        await saveInboxPreference({ onboardingCompleted: true });
+        await connectMailbox("google", "inbox");
+      } catch (error) {
+        setToast(error instanceof Error ? error.message : "Inbox access could not be started.");
+      }
+      return;
+    }
+    try {
+      await saveInboxPreference({ enabled: false, onboardingCompleted: true });
+      setMailboxes((current) => current.map((mailbox) => ({ ...mailbox, inboxAccessEnabled: false })));
+      setInboxAnswer("");
+      setInboxEvidence([]);
+      setToast("Inbox search turned off");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Inbox search could not be turned off.");
+    }
+  }
+
+  async function syncInbox(mailboxId: string) {
+    if (!mailboxId || inboxSyncing) return;
+    setInboxSyncing(true);
+    setInboxError("");
+    setInboxSyncProgress("Starting read-only sync…");
+    let pageToken: string | undefined;
+    let syncQuery: string | undefined;
+    try {
+      for (let page = 0; page < 500; page += 1) {
+        const response = await fetch("/api/inbox/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mailboxId, pageToken, syncQuery }),
+        });
+        const result = await response.json() as {
+          totalIndexed?: number;
+          totalEstimate?: number;
+          nextPageToken?: string | null;
+          syncQuery?: string;
+          done?: boolean;
+          error?: string;
+        };
+        if (!response.ok) throw new Error(result.error || "The inbox could not be synchronized.");
+        const estimate = result.totalEstimate ? ` of about ${result.totalEstimate}` : "";
+        setInboxSyncProgress(`${result.totalIndexed || 0}${estimate} messages indexed`);
+        pageToken = result.nextPageToken || undefined;
+        syncQuery = result.syncQuery;
+        if (result.done || !pageToken) {
+          const syncedAt = new Date().toISOString();
+          setMailboxes((current) => current.map((mailbox) => mailbox.id === mailboxId
+            ? {
+                ...mailbox,
+                inboxSyncStatus: "ready",
+                inboxLastSyncedAt: syncedAt,
+                inboxMessageCount: result.totalIndexed || mailbox.inboxMessageCount,
+              }
+            : mailbox));
+          setToast("Inbox sync complete");
+          return;
+        }
+      }
+      throw new Error("This mailbox is very large. Run sync again to continue.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The inbox could not be synchronized.";
+      setInboxError(message);
+      setToast(message);
+    } finally {
+      setInboxSyncing(false);
+    }
+  }
+
+  async function askInbox() {
+    const question = inboxQuestion.trim();
+    if (!question || inboxBusy) return;
+    setInboxBusy(true);
+    setInboxError("");
+    setInboxAnswer("");
+    setInboxEvidence([]);
+    try {
+      const response = await fetch("/api/inbox/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          mailboxId: selectedInboxMailboxId || undefined,
+        }),
+      });
+      const result = await response.json() as {
+        answer?: string;
+        evidence?: InboxEvidence[];
+        error?: string;
+      };
+      if (!response.ok || !result.answer) throw new Error(result.error || "The inbox question could not be answered.");
+      setInboxAnswer(result.answer);
+      setInboxEvidence(result.evidence || []);
+    } catch (error) {
+      setInboxError(error instanceof Error ? error.message : "The inbox question could not be answered.");
+    } finally {
+      setInboxBusy(false);
     }
   }
 
@@ -1555,6 +1739,17 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
               />
               <span className="rail-copy rounded border border-zinc-300 px-1.5 py-0.5 text-[10px] text-zinc-500">⌘K</span>
             </label>
+
+            <Button
+              variant="ghost"
+              className="mt-2 w-full justify-start border border-transparent px-2.5 text-zinc-700 hover:border-zinc-200 hover:bg-white hover:text-black"
+              onClick={() => setDialog("inbox")}
+              title="Ask your inbox"
+            >
+              <Inbox />
+              <span className="rail-copy">Ask inbox</span>
+              {inboxSettings.enabled ? <span className="rail-copy ml-auto size-1.5 rounded-full bg-black" /> : null}
+            </Button>
           </div>
 
           <nav className="min-h-0 flex-1 overflow-auto px-2">
@@ -1828,10 +2023,163 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
       </Dialog>
 
       <Dialog
+        open={showInboxOnboarding}
+        onClose={() => setShowInboxOnboarding(false)}
+        title="Optional: search your Gmail with AI"
+        description="You can skip this now and enable it later in Account settings."
+        className="max-w-xl"
+      >
+        <div className="space-y-5 p-6">
+          <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+            <p className="text-sm leading-6 text-zinc-700">
+              If enabled, Prexet makes a private searchable index of your Gmail message text and headers. You can ask things like “When did I last talk to Alex?” or “Find the email about the rent proposal.”
+            </p>
+            <ul className="mt-4 space-y-2 text-xs leading-5 text-zinc-600">
+              <li className="flex gap-2"><ShieldCheck className="mt-0.5 size-4 shrink-0 text-black" />Prexet and its AI cannot delete, move, archive, label, edit, or reply to messages.</li>
+              <li className="flex gap-2"><LockKeyhole className="mt-0.5 size-4 shrink-0 text-black" />Access is read-only, optional, and can be turned off later.</li>
+              <li className="flex gap-2"><Paperclip className="mt-0.5 size-4 shrink-0 text-black" />Attachment files are not downloaded into the inbox index.</li>
+            </ul>
+          </div>
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 p-4">
+            <input
+              type="checkbox"
+              checked={inboxOnboardingChoice}
+              onChange={(event) => setInboxOnboardingChoice(event.target.checked)}
+              className="mt-0.5 size-4 accent-black"
+            />
+            <span>
+              <span className="block text-sm font-medium text-zinc-950">Enable AI inbox search</span>
+              <span className="mt-1 block text-xs leading-5 text-zinc-500">This is unchecked by default. Google will show the exact read-only permission before anything is connected.</span>
+            </span>
+          </label>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="outline" onClick={() => void declineInboxOnboarding()}>Not now</Button>
+            <Button
+              onClick={() => void continueInboxOnboarding()}
+              disabled={!inboxOnboardingChoice}
+            >
+              Continue to Google
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={dialog === "inbox"}
+        onClose={() => setDialog(null)}
+        title="Ask your inbox"
+        description="Search the messages you chose to index. Answers always link back to supporting Gmail messages."
+        className="max-w-3xl"
+      >
+        {!inboxSettings.enabled ? (
+          <div className="p-6">
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-5">
+              <Inbox className="size-5 text-zinc-700" />
+              <h3 className="mt-4 text-sm font-semibold text-zinc-950">Inbox search is off</h3>
+              <p className="mt-2 max-w-xl text-sm leading-6 text-zinc-600">
+                This optional feature creates a private, read-only search index. Prexet cannot delete or change Gmail messages. You can review the details before connecting.
+              </p>
+              <Button className="mt-4" onClick={() => {
+                setDialog("account");
+              }}>
+                Review inbox setting
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-5 p-6">
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <div>
+                <label className="text-xs font-medium text-zinc-700" htmlFor="inbox-mailbox">Search mailbox</label>
+                <select
+                  id="inbox-mailbox"
+                  value={selectedInboxMailboxId}
+                  onChange={(event) => setSelectedInboxMailboxId(event.target.value)}
+                  className="mt-1 h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-black"
+                >
+                  {mailboxes.filter((mailbox) => mailbox.inboxAccessEnabled).map((mailbox) => (
+                    <option key={mailbox.id} value={mailbox.id}>{mailbox.email}</option>
+                  ))}
+                </select>
+              </div>
+              <Button
+                variant="outline"
+                className="self-end"
+                onClick={() => void syncInbox(selectedInboxMailboxId)}
+                disabled={!selectedInboxMailboxId || inboxSyncing}
+              >
+                {inboxSyncing ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
+                {inboxSyncing ? "Syncing" : "Sync now"}
+              </Button>
+            </div>
+            {inboxSyncProgress ? <p className="text-xs text-zinc-500">{inboxSyncProgress}</p> : null}
+
+            <div>
+              <label className="text-xs font-medium text-zinc-700" htmlFor="inbox-question">Question</label>
+              <textarea
+                id="inbox-question"
+                value={inboxQuestion}
+                onChange={(event) => setInboxQuestion(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void askInbox();
+                }}
+                rows={3}
+                className="mt-1 w-full resize-none rounded-xl border border-zinc-300 px-3 py-2.5 text-sm leading-6 outline-none focus:border-black"
+                placeholder="When did I last talk to Morgan about the NDA?"
+              />
+              <div className="mt-2 flex items-center justify-between gap-3">
+                <p className="text-xs text-zinc-500">Prexet only reads the index. It cannot take actions in Gmail.</p>
+                <Button onClick={() => void askInbox()} disabled={inboxBusy || !inboxQuestion.trim()}>
+                  {inboxBusy ? <LoaderCircle className="animate-spin" /> : <Sparkles />}
+                  Ask
+                </Button>
+              </div>
+            </div>
+
+            {inboxError ? <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{inboxError}</p> : null}
+            {inboxAnswer ? (
+              <section className="rounded-xl border border-zinc-200 p-5">
+                <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Answer</p>
+                <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-zinc-800">{inboxAnswer}</p>
+              </section>
+            ) : null}
+            {inboxEvidence.length ? (
+              <section>
+                <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Supporting emails</p>
+                <div className="mt-2 divide-y divide-zinc-200 overflow-hidden rounded-xl border border-zinc-200">
+                  {inboxEvidence.map((message, index) => (
+                    <a
+                      key={message.id}
+                      href={message.gmailUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block bg-white p-4 transition hover:bg-zinc-50"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-zinc-950">[{index + 1}] {message.subject}</p>
+                          <p className="mt-1 truncate text-xs text-zinc-500">From {message.from}</p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2 text-xs text-zinc-500">
+                          {new Date(message.date).toLocaleDateString()}
+                          <ExternalLink className="size-3.5" />
+                        </div>
+                      </div>
+                      <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-600">{message.snippet}</p>
+                    </a>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+          </div>
+        )}
+      </Dialog>
+
+      <Dialog
         open={dialog === "account"}
         onClose={() => setDialog(null)}
         title="Account settings"
-        description="Connect more than one sending address and choose the right mailbox for each project email."
+        description="Manage sending addresses and optional, read-only inbox search."
         className="max-w-2xl"
       >
         <div className="space-y-6 p-6">
@@ -1854,7 +2202,7 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
           </div>
           <div>
             <p className="text-sm font-semibold text-zinc-950">Sending mailboxes</p>
-            <p className="mt-1 text-sm leading-6 text-zinc-500">Access and refresh tokens are encrypted and kept on the server. Prexet requests send-only permissions.</p>
+            <p className="mt-1 text-sm leading-6 text-zinc-500">Access and refresh tokens are encrypted and kept on the server. Sending uses a send-only permission unless you separately enable inbox search.</p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-xl border border-zinc-200 p-4">
@@ -1894,7 +2242,10 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
                   <div key={mailbox.id} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2.5">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium text-zinc-900">{mailbox.email}</p>
-                      <p className="text-xs text-zinc-500">{mailbox.status === "connected" ? "Ready to send" : "Reconnect required"}</p>
+                      <p className="text-xs text-zinc-500">
+                        {mailbox.status === "connected" ? "Ready to send" : "Reconnect required"}
+                        {mailbox.inboxAccessEnabled ? ` · ${mailbox.inboxMessageCount.toLocaleString()} messages indexed` : ""}
+                      </p>
                     </div>
                     <Button variant="ghost" size="sm" onClick={() => void disconnectMailbox(mailbox.id)}>Disconnect</Button>
                   </div>
@@ -1903,6 +2254,56 @@ function AuthenticatedWorkspace({ user }: { user: { name: string; email: string;
             ) : (
               <p className="mt-1 text-xs leading-5 text-zinc-500">No mailboxes connected yet. Add Gmail to start sending.</p>
             )}
+          </div>
+          <div className="rounded-xl border border-zinc-200 p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Inbox className="size-4 text-zinc-700" />
+                  <p className="text-sm font-semibold text-zinc-950">AI inbox search</p>
+                  <Badge className="border-zinc-200 bg-zinc-50 text-zinc-600">Optional</Badge>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-zinc-500">
+                  Index message text and headers so you can find emails and ask when you last spoke with someone. Attachments are not downloaded. Prexet cannot delete, move, archive, label, edit, or reply to Gmail messages.
+                </p>
+              </div>
+              <label className="relative mt-0.5 inline-flex shrink-0 cursor-pointer items-center">
+                <input
+                  type="checkbox"
+                  checked={inboxSettings.enabled}
+                  onChange={(event) => void changeInboxEnabled(event.target.checked)}
+                  className="peer sr-only"
+                  aria-label="Enable AI inbox search"
+                />
+                <span className="h-6 w-11 rounded-full bg-zinc-200 transition peer-checked:bg-black peer-focus-visible:ring-2 peer-focus-visible:ring-black peer-focus-visible:ring-offset-2 after:absolute after:left-1 after:top-1 after:size-4 after:rounded-full after:bg-white after:transition-transform peer-checked:after:translate-x-5" />
+              </label>
+            </div>
+            {inboxSettings.enabled ? (
+              <div className="mt-4 space-y-2 border-t border-zinc-200 pt-4">
+                {mailboxes.filter((mailbox) => mailbox.inboxAccessEnabled).map((mailbox) => (
+                  <div key={mailbox.id} className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-medium text-zinc-800">{mailbox.email}</p>
+                      <p className="mt-0.5 text-xs text-zinc-500">
+                        {mailbox.inboxLastSyncedAt
+                          ? `Last synced ${new Date(mailbox.inboxLastSyncedAt).toLocaleString()}`
+                          : "Not synced yet"}
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void syncInbox(mailbox.id)}
+                      disabled={inboxSyncing}
+                    >
+                      {inboxSyncing ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
+                      {mailbox.inboxLastSyncedAt ? "Sync again" : "Start sync"}
+                    </Button>
+                  </div>
+                ))}
+                {inboxSyncProgress ? <p className="text-xs text-zinc-500">{inboxSyncProgress}</p> : null}
+              </div>
+            ) : null}
           </div>
           <div className="flex items-center gap-4 text-xs text-zinc-500">
             <Link href="/privacy" className="hover:text-black">Privacy</Link>

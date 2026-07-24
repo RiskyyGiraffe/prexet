@@ -16,8 +16,10 @@ export async function GET(request: Request, context: RouteContext<"/api/mail/cal
     const sessionUserId = await authenticatedUserId(request);
     if (sessionUserId !== state.userId) throw new Error("Sign in again before connecting this mailbox.");
     const tokens = await exchangeAuthorizationCode(provider as MailProvider, code);
-    await persistMailboxConnection(state.userId, provider as MailProvider, tokens);
-    return Response.redirect(`${appUrl}/?mailbox=connected`);
+    await persistMailboxConnection(state.userId, provider as MailProvider, tokens, {
+      enableInbox: state.accessMode === "inbox",
+    });
+    return Response.redirect(`${appUrl}/?mailbox=${state.accessMode === "inbox" ? "inbox_connected" : "connected"}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Mailbox connection failed.";
     return Response.redirect(`${appUrl}/?mailbox_error=${encodeURIComponent(message)}`);

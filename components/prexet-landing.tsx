@@ -48,7 +48,7 @@ export function PrexetLanding() {
               Prexet helps professional teams upload forms and recipient lists, organize recipients into project stages, prepare native Word redlines with AI, review individual transmission drafts, and send approved emails through a connected Gmail account.
             </p>
             <p className="mt-3 max-w-xl text-sm leading-7 text-zinc-600">
-              Gmail access is requested only when a user connects a mailbox and is used solely to send emails the user reviews and approves. Prexet does not read Gmail inboxes.
+              Gmail sending access is used only for emails the user reviews and approves. Users may separately opt into read-only inbox search; it is off by default, never permits deletion or mailbox changes, and can be turned off in account settings.
             </p>
           </section>
 

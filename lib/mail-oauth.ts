@@ -9,6 +9,7 @@ export type MailProvider = "google" | "microsoft";
 type OAuthState = {
   provider: MailProvider;
   userId: string;
+  accessMode: "send" | "inbox";
   nonce: string;
   expiresAt: number;
 };
@@ -36,10 +37,11 @@ export async function authenticatedUserId(request: Request) {
   return session.user.id;
 }
 
-export function createOAuthState(provider: MailProvider, userId: string) {
+export function createOAuthState(provider: MailProvider, userId: string, accessMode: OAuthState["accessMode"] = "send") {
   const state: OAuthState = {
     provider,
     userId,
+    accessMode,
     nonce: randomBytes(16).toString("hex"),
     expiresAt: Date.now() + 10 * 60 * 1000,
   };
@@ -56,13 +58,14 @@ export function verifyOAuthState(value: string): OAuthState {
   if (expectedSignature.length !== receivedSignature.length || !timingSafeEqual(expectedSignature, receivedSignature)) {
     throw new Error("The mailbox connection has invalid state.");
   }
-  const state = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as OAuthState;
+  const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as OAuthState & { accessMode?: OAuthState["accessMode"] };
+  const state: OAuthState = { ...parsed, accessMode: parsed.accessMode === "inbox" ? "inbox" : "send" };
   if (state.expiresAt < Date.now()) throw new Error("The mailbox connection expired. Please try again.");
   if (state.provider !== "google" && state.provider !== "microsoft") throw new Error("Unknown mailbox provider.");
   return state;
 }
 
-export function authorizationUrl(provider: MailProvider, state: string) {
+export function authorizationUrl(provider: MailProvider, state: string, accessMode: OAuthState["accessMode"] = "send") {
   const appUrl = required("NEXT_PUBLIC_APP_URL").replace(/\/$/, "");
   if (provider === "google") {
     const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -72,7 +75,13 @@ export function authorizationUrl(provider: MailProvider, state: string) {
       response_type: "code",
       access_type: "offline",
       prompt: "consent",
-      scope: "openid email https://www.googleapis.com/auth/gmail.send",
+      include_granted_scopes: "true",
+      scope: [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/gmail.send",
+        ...(accessMode === "inbox" ? ["https://www.googleapis.com/auth/gmail.readonly"] : []),
+      ].join(" "),
       state,
     }).toString();
     return url.toString();
@@ -127,18 +136,28 @@ export async function providerMailbox(provider: MailProvider, accessToken: strin
   };
 }
 
-export async function persistMailboxConnection(userId: string, provider: MailProvider, tokens: ProviderTokens) {
+export async function persistMailboxConnection(
+  userId: string,
+  provider: MailProvider,
+  tokens: ProviderTokens,
+  options: { enableInbox?: boolean } = {},
+) {
   const mailbox = await providerMailbox(provider, tokens.access_token);
   const accessToken = encryptMailToken(tokens.access_token);
   const refreshToken = tokens.refresh_token ? encryptMailToken(tokens.refresh_token) : undefined;
   const supabase = createSupabaseAdminClient();
   const { data: existing } = await supabase
     .from("prexet_mailbox_connections")
-    .select("encrypted_refresh_token,refresh_token_iv,refresh_token_tag")
+    .select("encrypted_refresh_token,refresh_token_iv,refresh_token_tag,scopes,inbox_access_enabled")
     .eq("user_id", userId)
     .eq("provider", provider)
     .eq("email", mailbox.email)
     .maybeSingle();
+  const scopes = tokens.scope?.split(" ").filter(Boolean) || existing?.scopes || [];
+  const inboxAccessEnabled = Boolean(
+    (options.enableInbox || existing?.inbox_access_enabled)
+    && scopes.includes("https://www.googleapis.com/auth/gmail.readonly"),
+  );
   const { error } = await supabase
     .from("prexet_mailbox_connections")
     .upsert({
@@ -154,10 +173,22 @@ export async function persistMailboxConnection(userId: string, provider: MailPro
       refresh_token_iv: refreshToken?.iv || existing?.refresh_token_iv || null,
       refresh_token_tag: refreshToken?.tag || existing?.refresh_token_tag || null,
       access_token_expires_at: tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000).toISOString() : null,
-      scopes: tokens.scope?.split(" ") || [],
+      scopes,
+      inbox_access_enabled: inboxAccessEnabled,
       status: "connected",
       updated_at: new Date().toISOString(),
     }, { onConflict: "user_id,provider,email" });
   if (error) throw new Error("The mailbox tokens could not be stored securely.");
+  if (options.enableInbox) {
+    const { error: settingsError } = await supabase
+      .from("prexet_user_settings")
+      .upsert({
+        user_id: userId,
+        inbox_onboarding_completed: true,
+        inbox_search_enabled: inboxAccessEnabled,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id" });
+    if (settingsError) throw new Error("Inbox search preferences could not be saved.");
+  }
   return mailbox;
 }
